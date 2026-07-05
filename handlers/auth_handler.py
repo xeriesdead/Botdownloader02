@@ -107,6 +107,9 @@ def setup(app):
                     api_id=API_ID,
                     api_hash=API_HASH,
                     in_memory=True,
+                    device_model="BOT Downloader",
+                    app_version="1.0",
+                    system_version="BOT Downloader Server",
                 )
                 await tmp.connect()
                 sent = await tmp.send_code(phone)
