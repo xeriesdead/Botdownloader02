@@ -1,21 +1,37 @@
-import sqlite3
+import os
+import re
 import threading
+
+import psycopg2
+import psycopg2.extras
+
+
+def _to_pg(query: str) -> str:
+    """Ubah placeholder '?' gaya SQLite jadi '%s' gaya PostgreSQL."""
+    return query.replace("?", "%s")
 
 
 class Database:
-    def __init__(self, path="data/bot.db"):
-        os_import = __import__("os")
-        os_import.makedirs("data", exist_ok=True)
-        self.conn = sqlite3.connect(path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+    def __init__(self, dsn: str | None = None):
+        self.dsn = dsn or os.environ.get(
+            "DATABASE_URL",
+            os.environ.get("Connection_String") or os.environ.get("Connecting String"),
+        )
+        if not self.dsn:
+            raise RuntimeError(
+                "DATABASE_URL tidak ditemukan di environment. "
+                "Set secret DATABASE_URL dengan connection string PostgreSQL."
+            )
         self.lock = threading.Lock()
+        self.conn = psycopg2.connect(self.dsn)
+        self.conn.autocommit = True
         self._init_db()
 
     def _init_db(self):
-        with self.lock:
-            self.conn.executescript("""
+        with self.lock, self.conn.cursor() as cur:
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
-                    user_id        INTEGER PRIMARY KEY,
+                    user_id        BIGINT PRIMARY KEY,
                     username       TEXT    DEFAULT '',
                     session_string TEXT,
                     phone          TEXT,
@@ -24,16 +40,17 @@ class Database:
                     premium        INTEGER DEFAULT 0,
                     premium_until  TEXT,
                     target         TEXT,
-                    referrer_id    INTEGER,
-                    last_reset     TEXT    DEFAULT (date('now')),
-                    banned         INTEGER DEFAULT 0
+                    referrer_id    BIGINT,
+                    last_reset     TEXT    DEFAULT CURRENT_DATE::TEXT,
+                    banned         INTEGER DEFAULT 0,
+                    login_at       TEXT
                 );
                 CREATE TABLE IF NOT EXISTS activity_log (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id    INTEGER NOT NULL,
+                    id         SERIAL PRIMARY KEY,
+                    user_id    BIGINT NOT NULL,
                     event_type TEXT    NOT NULL,
                     detail     TEXT,
-                    created_at TEXT    DEFAULT (datetime('now'))
+                    created_at TEXT    DEFAULT (NOW()::TEXT)
                 );
                 CREATE INDEX IF NOT EXISTS idx_activity_user  ON activity_log(user_id);
                 CREATE INDEX IF NOT EXISTS idx_activity_date  ON activity_log(created_at);
@@ -43,21 +60,6 @@ class Database:
                     value TEXT
                 );
             """)
-            # Migrasi kolom baru agar DB lama tidak error
-            existing = {row[1] for row in self.conn.execute("PRAGMA table_info(users)")}
-            migrations = {
-                "bonus_quota":   "ALTER TABLE users ADD COLUMN bonus_quota INTEGER DEFAULT 0",
-                "premium_until": "ALTER TABLE users ADD COLUMN premium_until TEXT",
-                "referrer_id":   "ALTER TABLE users ADD COLUMN referrer_id INTEGER",
-                "phone":         "ALTER TABLE users ADD COLUMN phone TEXT",
-                "last_reset":    "ALTER TABLE users ADD COLUMN last_reset TEXT",
-                "banned":        "ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0",
-                "login_at":      "ALTER TABLE users ADD COLUMN login_at TEXT",
-            }
-            for col, sql in migrations.items():
-                if col not in existing:
-                    self.conn.execute(sql)
-            self.conn.commit()
 
     # ------------------------------------------------------------------ #
     #  Generic helpers
@@ -65,20 +67,34 @@ class Database:
 
     def execute(self, query: str, params: tuple = ()) -> int:
         with self.lock:
-            cur = self.conn.execute(query, params)
-            self.conn.commit()
-            return cur.rowcount
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute(_to_pg(query), params)
+                    return cur.rowcount
+            except psycopg2.Error:
+                self.conn.rollback()
+                raise
 
     def fetchone(self, query: str, params: tuple = ()):
         with self.lock:
-            cur = self.conn.execute(query, params)
-            row = cur.fetchone()
-            return dict(row) if row else None
+            try:
+                with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(_to_pg(query), params)
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+            except psycopg2.Error:
+                self.conn.rollback()
+                raise
 
     def fetchall(self, query: str, params: tuple = ()):
         with self.lock:
-            cur = self.conn.execute(query, params)
-            return [dict(r) for r in cur.fetchall()]
+            try:
+                with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(_to_pg(query), params)
+                    return [dict(r) for r in cur.fetchall()]
+            except psycopg2.Error:
+                self.conn.rollback()
+                raise
 
     # ------------------------------------------------------------------ #
     #  User helpers
@@ -86,7 +102,8 @@ class Database:
 
     def create_user(self, user_id: int, username: str = ""):
         self.execute(
-            "INSERT OR IGNORE INTO users(user_id, username) VALUES (?, ?)",
+            "INSERT INTO users(user_id, username) VALUES (?, ?) "
+            "ON CONFLICT (user_id) DO NOTHING",
             (user_id, username),
         )
 
@@ -138,7 +155,7 @@ class Database:
 
     def reset_daily_quota(self, user_id: int, amount: int = 5):
         self.execute(
-            "UPDATE users SET quota = ?, last_reset = date('now') WHERE user_id = ?",
+            "UPDATE users SET quota = ?, last_reset = CURRENT_DATE::TEXT WHERE user_id = ?",
             (amount, user_id),
         )
 
