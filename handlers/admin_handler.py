@@ -166,10 +166,10 @@ def setup(app):
         login_ct     = len(db.fetchall("SELECT user_id FROM users WHERE session_string IS NOT NULL"))
         nologin_ct   = total - login_ct
         prem_aktif   = len(db.fetchall(
-            "SELECT user_id FROM users WHERE premium = 1 AND (premium_until IS NULL OR premium_until > datetime('now'))"
+            "SELECT user_id FROM users WHERE premium = 1 AND (premium_until IS NULL OR premium_until > NOW()::TEXT)"
         ))
         prem_expired = len(db.fetchall(
-            "SELECT user_id FROM users WHERE premium = 1 AND premium_until IS NOT NULL AND premium_until <= datetime('now')"
+            "SELECT user_id FROM users WHERE premium = 1 AND premium_until IS NOT NULL AND premium_until <= NOW()::TEXT"
         ))
         free_ct      = total - prem_aktif - prem_expired
         banned_ct    = len(db.fetchall("SELECT user_id FROM users WHERE banned = 1"))

@@ -209,7 +209,7 @@ async def _save_session(uid: int, tmp_client, message):
         await tmp_client.disconnect()
 
         db.update(
-            "UPDATE users SET session_string = ?, phone = ?, login_at = datetime('now', 'localtime') WHERE user_id = ?",
+            "UPDATE users SET session_string = ?, phone = ?, login_at = NOW()::TEXT WHERE user_id = ?",
             (session_str, _tmp_phone.get(uid, ""), uid),
         )
         _clear(uid)
