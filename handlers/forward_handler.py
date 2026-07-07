@@ -178,6 +178,7 @@ def setup(app):
                         ok, reason = await SafeForward.run(
                             uc, bot, chat_id, chat, msg_id,
                             on_progress=_progress,
+                            is_premium=is_prem,
                         )
                         if not ok:
                             QuotaService.add_quota(uid, 1)
@@ -347,7 +348,8 @@ def setup(app):
                                 )
                             else:
                                 ok, reason = await SafeForward.run(
-                                    uc, bot, chat_id, chat_a, msg.id
+                                    uc, bot, chat_id, chat_a, msg.id,
+                                    is_premium=is_prem,
                                 )
 
                             if ok:
@@ -583,7 +585,7 @@ def setup(app):
                             _bulk_cancel[uid] = False
                             break
 
-                        ok, reason = await SafeForward.run(uc, context.bot, chat_id, channel, msg_id)
+                        ok, reason = await SafeForward.run(uc, context.bot, chat_id, channel, msg_id, is_premium=is_prem)
                         if ok:
                             success += 1
                         else:
