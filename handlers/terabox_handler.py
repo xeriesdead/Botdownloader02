@@ -14,7 +14,7 @@ from modules.activity_log import log as activity_log
 from modules.channel_guard import require_member
 from database.db import db
 from logger import logger
-from config import MAX_FILE_SIZE_BYTES, ADMIN_IDS
+from config import MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_BYTES_PREMIUM, ADMIN_IDS
 
 _DOWNLOADS_DIR   = "downloads"
 _PROGRESS_INTERVAL = 3.0
@@ -121,11 +121,13 @@ def setup(app):
         fname     = file_info["filename"]
         fsize     = file_info["size"]
 
-        if fsize > MAX_FILE_SIZE_BYTES:
+        size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_prem else MAX_FILE_SIZE_BYTES
+        if fsize > size_limit:
             QuotaService.add_quota(uid, 1)
+            limit_label = "2 GB (Premium)" if is_prem else "1 GB"
             return await edit(
                 f"❌ File terlalu besar: <b>{_fmt_size(fsize)}</b>\n"
-                f"Batas maksimal: <b>{_fmt_size(MAX_FILE_SIZE_BYTES)}</b>"
+                f"Batas maksimal: <b>{_fmt_size(size_limit)}</b> ({limit_label})"
             )
 
         # ── Dapatkan download URL ──────────────────────────────────────────
