@@ -161,6 +161,10 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
 
     return _cb
 
+_PEER_RESOLVE_TIMEOUT = 20   # detik — batas waktu resolve peer & get_chat
+_MSG_FETCH_TIMEOUT    = 25   # detik — batas waktu get_messages
+
+
 async def _is_forwards_restricted(client, chat) -> bool:
     """
     Cek apakah channel/grup mengaktifkan 'Restrict Saving Content' (noforwards).
@@ -171,12 +175,17 @@ async def _is_forwards_restricted(client, chat) -> bool:
     if cache_key in _forwards_restricted_cache:
         return _forwards_restricted_cache[cache_key]
     try:
-        chat_obj = await client.get_chat(chat)
+        chat_obj = await asyncio.wait_for(
+            client.get_chat(chat), timeout=_PEER_RESOLVE_TIMEOUT
+        )
         restricted = bool(getattr(chat_obj, "has_protected_content", False))
         _forwards_restricted_cache[cache_key] = restricted
         if restricted:
             logger.info(f"Chat {chat} memiliki noforwards aktif — pakai strategi download+upload")
         return restricted
+    except asyncio.TimeoutError:
+        logger.warning(f"Timeout get_chat({chat}) saat cek noforwards — anggap tidak restricted")
+        return False
     except Exception as e:
         logger.warning(f"Gagal cek has_protected_content untuk {chat}: {e}")
         return False
@@ -184,17 +193,24 @@ async def _is_forwards_restricted(client, chat) -> bool:
 
 async def _resolve_source(client, chat) -> tuple[object | None, str | None]:
     """Resolve source peer. Return (peer, None) atau (None, error_msg)."""
+    label = chat if isinstance(chat, str) else f"ID {chat}"
     try:
-        peer = await client.resolve_peer(chat)
+        peer = await asyncio.wait_for(
+            client.resolve_peer(chat), timeout=_PEER_RESOLVE_TIMEOUT
+        )
         return peer, None
+    except asyncio.TimeoutError:
+        logger.warning(f"Timeout resolve_peer({chat})")
+        return None, (
+            f"❌ Tidak bisa mengakses channel (timeout).\n"
+            "Pastikan akun sudah bergabung ke channel tersebut."
+        )
     except (UsernameNotOccupied, UsernameInvalid):
-        label = chat if isinstance(chat, str) else f"ID {chat}"
         return None, f"Channel/grup `{label}` tidak ditemukan atau sudah tidak aktif."
     except _PEER_ERRORS:
-        label = chat if isinstance(chat, str) else f"ID {chat}"
         return None, (
-            f"Tidak bisa mengakses `{label}`.\n"
-            "Pastikan akun yang login sudah **bergabung** ke channel/grup tersebut."
+            f"❌ Tidak bisa mengakses channel.\n"
+            "Pastikan akun yang login sudah bergabung ke channel/grup tersebut."
         )
     except Exception as e:
         logger.warning(f"resolve_peer({chat}) error: {e}")
@@ -659,11 +675,22 @@ class SafeForward:
 
         # ── Langkah 2: Ambil pesan ───────────────────────────────────────
         try:
-            msg = await client.get_messages(chat, msg_id)
+            msg = await asyncio.wait_for(
+                client.get_messages(chat, msg_id), timeout=_MSG_FETCH_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout get_messages({chat}, {msg_id})")
+            return False, (
+                "❌ Tidak bisa mengambil pesan (timeout).\n"
+                "Pastikan akun sudah bergabung ke channel tersebut."
+            )
         except (MessageIdInvalid, MsgIdInvalid):
             return False, f"Pesan nomor `{msg_id}` tidak ditemukan."
         except _PEER_ERRORS:
-            return False, "Tidak bisa mengakses channel. Pastikan akun sudah bergabung."
+            return False, (
+                "❌ Tidak bisa mengakses channel.\n"
+                "Pastikan akun yang login sudah bergabung ke channel/grup tersebut."
+            )
         except Exception as e:
             logger.warning(f"get_messages({chat}, {msg_id}) error: {e}")
             return False, f"Gagal mengambil pesan: {e}"
@@ -764,7 +791,10 @@ class SafeForward:
             except FileReferenceExpired:
                 if attempt < MAX_RETRIES:
                     try:
-                        msg = await client.get_messages(chat, msg_id)
+                        msg = await asyncio.wait_for(
+                            client.get_messages(chat, msg_id),
+                            timeout=_MSG_FETCH_TIMEOUT,
+                        )
                         await asyncio.sleep(1)
                     except Exception:
                         pass
