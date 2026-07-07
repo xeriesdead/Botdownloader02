@@ -30,6 +30,7 @@ def setup(app):
         is_prem    = QuotaService.is_premium(uid)
         my_queue   = prem if is_prem else reg
         your_label = "💎 Antrian premium" if is_prem else "📋 Antrian reguler"
+        my_pos     = queue_manager.get_position(uid, is_prem)
 
         lines = [
             f"📊 <b>Status Server Download</b>",
@@ -45,12 +46,14 @@ def setup(app):
             f"📌 {your_label}: <b>{my_queue} job</b> dalam antrian",
         ]
 
-        if my_queue == 0 and act < WORKER_COUNT:
+        if my_pos > 0:
+            lines.append(f"🎯 <b>Posisi kamu: ke-{my_pos} dalam antrian</b>")
+        elif my_queue == 0 and act < WORKER_COUNT:
             lines.append("🚀 <i>Downloadmu akan langsung diproses!</i>")
         elif my_queue == 0 and act == WORKER_COUNT:
             lines.append("⏳ <i>Semua worker sibuk, tapi giliran kamu dekat.</i>")
         else:
-            lines.append(f"⏳ <i>Estimasi posisi: ke-{my_queue + 1} dalam antrian.</i>")
+            lines.append(f"⏳ <i>{my_queue} job menunggu dalam antrian.</i>")
 
         await update.message.reply_text(
             "\n".join(lines),

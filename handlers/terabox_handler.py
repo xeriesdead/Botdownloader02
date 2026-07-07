@@ -9,6 +9,7 @@ from modules.terabox import (
     download_file, get_bduss,
 )
 from modules.quota_service import QuotaService
+from modules.queue_manager import queue_manager
 from modules.activity_log import log as activity_log
 from modules.channel_guard import require_member
 from database.db import db
@@ -80,6 +81,11 @@ def setup(app):
                 parse_mode=ParseMode.HTML,
             )
 
+        is_prem = QuotaService.is_premium(uid)
+        if not queue_manager.can_add(is_prem):
+            QuotaService.add_quota(uid, 1)
+            return await update.message.reply_text("❌ Server sedang sibuk, coba lagi nanti.")
+
         pmsg = await update.message.reply_text(
             "🔍 Mengambil info file dari Terabox...",
         )
@@ -122,13 +128,13 @@ def setup(app):
                 f"Batas maksimal: <b>{_fmt_size(MAX_FILE_SIZE_BYTES)}</b>"
             )
 
+        # ── Dapatkan download URL ──────────────────────────────────────────
         await edit(
             f"🔗 Mendapatkan link download...\n"
             f"📄 <b>{fname}</b>\n"
             f"📦 {_fmt_size(fsize) if fsize else '?'}"
         )
 
-        # ── Dapatkan download URL ──────────────────────────────────────────
         try:
             dlink = await get_download_url(file_info)
         except PermissionError as e:
@@ -142,93 +148,121 @@ def setup(app):
             QuotaService.add_quota(uid, 1)
             return await edit("❌ Gagal mendapatkan link download. Coba lagi nanti.")
 
-        await edit(
-            f"⬇️ <b>Mengunduh dari Terabox...</b>\n"
-            f"📄 {fname}\n"
-            f"📦 {_fmt_size(fsize) if fsize else '?'}"
-        )
+        # ── Bungkus download + kirim ke dalam antrian ─────────────────────
+        safe = "".join(c if c.isalnum() or c in "._- " else "_" for c in fname)
+        dest = os.path.join(_DOWNLOADS_DIR, f"tb_{uid}_{int(time.time())}_{safe}")
 
-        # ── Download ───────────────────────────────────────────────────────
-        safe  = "".join(c if c.isalnum() or c in "._- " else "_" for c in fname)
-        dest  = os.path.join(_DOWNLOADS_DIR, f"tb_{uid}_{int(time.time())}_{safe}")
-        last_edit = time.monotonic()
+        async def terabox_job():
+            last_edit_t = [time.monotonic()]
 
-        async def on_progress(downloaded: int, total: int):
-            nonlocal last_edit
-            if time.monotonic() - last_edit < _PROGRESS_INTERVAL:
+            async def on_progress(downloaded: int, total: int):
+                if time.monotonic() - last_edit_t[0] < _PROGRESS_INTERVAL:
+                    return
+                last_edit_t[0] = time.monotonic()
+                if total:
+                    pct = downloaded / total * 100
+                    bar = "█" * int(pct // 10) + "░" * (10 - int(pct // 10))
+                    txt = (f"⬇️ <b>Mengunduh...</b>\n📄 {fname}\n"
+                           f"[{bar}] {pct:.1f}%\n"
+                           f"{_fmt_size(downloaded)} / {_fmt_size(total)}")
+                else:
+                    txt = (f"⬇️ <b>Mengunduh...</b>\n📄 {fname}\n"
+                           f"{_fmt_size(downloaded)} terunduh...")
+                await edit(txt)
+
+            await edit(
+                f"⬇️ <b>Mengunduh dari Terabox...</b>\n"
+                f"📄 {fname}\n"
+                f"📦 {_fmt_size(fsize) if fsize else '?'}"
+            )
+
+            try:
+                await download_file(dlink, dest, on_progress=on_progress)
+            except Exception as e:
+                logger.error(f"[terabox] download uid={uid}: {e}", exc_info=True)
+                QuotaService.add_quota(uid, 1)
+                if os.path.exists(dest):
+                    os.remove(dest)
+                await edit(f"❌ Gagal mengunduh file: {e}")
                 return
-            last_edit = time.monotonic()
-            if total:
-                pct = downloaded / total * 100
-                bar = "█" * int(pct // 10) + "░" * (10 - int(pct // 10))
-                txt = (f"⬇️ <b>Mengunduh...</b>\n📄 {fname}\n"
-                       f"[{bar}] {pct:.1f}%\n"
-                       f"{_fmt_size(downloaded)} / {_fmt_size(total)}")
-            else:
-                txt = (f"⬇️ <b>Mengunduh...</b>\n📄 {fname}\n"
-                       f"{_fmt_size(downloaded)} terunduh...")
-            await edit(txt)
 
-        try:
-            await download_file(dlink, dest, on_progress=on_progress)
-        except Exception as e:
-            logger.error(f"[terabox] download uid={uid}: {e}", exc_info=True)
-            QuotaService.add_quota(uid, 1)
-            if os.path.exists(dest):
-                os.remove(dest)
-            return await edit(f"❌ Gagal mengunduh file: {e}")
+            actual_size = os.path.getsize(dest)
+            await edit(f"📤 Mengirim <b>{fname}</b> ke chat...")
 
-        actual_size = os.path.getsize(dest)
-        await edit(f"📤 Mengirim <b>{fname}</b> ke chat...")
-
-        # ── Kirim ke Telegram ──────────────────────────────────────────────
-        try:
-            caption = (f"📦 <b>{fname}</b>\n"
-                       f"📁 {_fmt_size(actual_size)}\n\n"
-                       f"<i>via @BOT_downloader_bot</i>")
-            if actual_size <= _MAX_TG_DIRECT:
-                with open(dest, "rb") as f:
-                    await bot.send_document(
-                        chat_id=chat_id, document=f,
-                        filename=fname, caption=caption,
+            try:
+                caption = (f"📦 <b>{fname}</b>\n"
+                           f"📁 {_fmt_size(actual_size)}\n\n"
+                           f"<i>via @BOT_downloader_bot</i>")
+                if actual_size <= _MAX_TG_DIRECT:
+                    with open(dest, "rb") as f:
+                        await bot.send_document(
+                            chat_id=chat_id, document=f,
+                            filename=fname, caption=caption,
+                            parse_mode=ParseMode.HTML,
+                        )
+                else:
+                    if not _check_logged_in(uid):
+                        QuotaService.add_quota(uid, 1)
+                        os.remove(dest)
+                        await edit(
+                            f"⚠️ File besar ({_fmt_size(actual_size)}) — kamu perlu /login "
+                            "agar bot bisa kirim ke Saved Messages."
+                        )
+                        return
+                    from modules.session_manager import session_manager
+                    uc = await session_manager.get(uid)
+                    if not uc:
+                        QuotaService.add_quota(uid, 1)
+                        os.remove(dest)
+                        await edit("❌ Session tidak valid. Silakan /login ulang.")
+                        return
+                    await uc.send_document("me", dest, caption=caption)
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(f"✅ <b>{fname}</b> ({_fmt_size(actual_size)}) dikirim ke "
+                              "<b>Saved Messages</b> kamu karena ukurannya melebihi 50 MB."),
                         parse_mode=ParseMode.HTML,
                     )
-            else:
-                if not _check_logged_in(uid):
-                    QuotaService.add_quota(uid, 1)
-                    os.remove(dest)
-                    return await edit(
-                        f"⚠️ File besar ({_fmt_size(actual_size)}) — kamu perlu /login "
-                        "agar bot bisa kirim ke Saved Messages."
-                    )
-                from modules.session_manager import session_manager
-                uc = await session_manager.get(uid)
-                if not uc:
-                    QuotaService.add_quota(uid, 1)
-                    os.remove(dest)
-                    return await edit("❌ Session tidak valid. Silakan /login ulang.")
-                await uc.send_document("me", dest, caption=caption)
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=(f"✅ <b>{fname}</b> ({_fmt_size(actual_size)}) dikirim ke "
-                          "<b>Saved Messages</b> kamu karena ukurannya melebihi 50 MB."),
-                    parse_mode=ParseMode.HTML,
-                )
 
-            activity_log(uid, "terabox_download", fname)
-            q    = QuotaService.get_quota(uid)
-            qd   = "∞ Unlimited" if q.get("unlimited") else str(q["total"])
-            await edit(f"✅ <b>Selesai!</b>\n📄 {fname}\n📦 Sisa quota: <b>{qd}</b>")
+                activity_log(uid, "terabox_download", fname)
+                q   = QuotaService.get_quota(uid)
+                qd  = "∞ Unlimited" if q.get("unlimited") else str(q["total"])
+                await edit(f"✅ <b>Selesai!</b>\n📄 {fname}\n📦 Sisa quota: <b>{qd}</b>")
 
-        except Exception as e:
-            logger.error(f"[terabox] send uid={uid}: {e}", exc_info=True)
+            except Exception as e:
+                logger.error(f"[terabox] send uid={uid}: {e}", exc_info=True)
+                QuotaService.add_quota(uid, 1)
+                await edit(f"❌ Gagal mengirim file ke Telegram: {e}")
+            finally:
+                try:
+                    os.remove(dest)
+                except Exception:
+                    pass
+
+        # ── Masukkan ke antrian & tampilkan posisi ─────────────────────────
+        pos = queue_manager.add_job(terabox_job, is_prem, uid)
+        if pos == 0:
             QuotaService.add_quota(uid, 1)
-            await edit(f"❌ Gagal mengirim file ke Telegram: {e}")
-        finally:
-            try:
-                os.remove(dest)
-            except Exception:
-                pass
+            await edit("❌ Server sedang sibuk, coba lagi nanti.")
+            return
+
+        q          = QuotaService.get_quota(uid)
+        quota_disp = "∞ Unlimited" if q.get("unlimited") else str(q["total"])
+
+        if pos > 1:
+            await edit(
+                f"📋 <b>Masuk antrian!</b>\n"
+                f"Posisi kamu: <b>ke-{pos}</b> dalam antrian\n"
+                f"⏳ Download akan dimulai setelah giliran tiba.\n\n"
+                f"📄 {fname}  •  📦 {_fmt_size(fsize) if fsize else '?'}\n"
+                f"Sisa quota: <b>{quota_disp}</b>"
+            )
+        else:
+            await edit(
+                f"⏳ Giliran kamu berikutnya!\n"
+                f"📄 {fname}  •  📦 {_fmt_size(fsize) if fsize else '?'}\n"
+                f"Sisa quota: <b>{quota_disp}</b>"
+            )
 
     # ── /setterabox [cookie] (admin only) ───────────────────────────────
     async def set_terabox(update, context):

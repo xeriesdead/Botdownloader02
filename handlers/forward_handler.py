@@ -143,17 +143,9 @@ def setup(app):
 
             q          = QuotaService.get_quota(uid)
             quota_disp = "∞ Unlimited" if q.get("unlimited") else str(q["total"])
-            pos        = queue_manager.size["premium" if is_prem else "regular"]
-            if pos > 0:
-                init_text = (
-                    f"📋 <b>Masuk antrian!</b>\n"
-                    f"Posisi kamu: <b>ke-{pos + 1}</b>\n"
-                    f"⏳ Download akan dimulai setelah giliran tiba.\n\n"
-                    f"📦 Sisa quota: <b>{quota_disp}</b>"
-                )
-            else:
-                init_text = f"⏳ Sedang mengunduh...\n📦 Sisa quota: <b>{quota_disp}</b>"
-            pmsg    = await update.message.reply_text(init_text, parse_mode=ParseMode.HTML)
+
+            # Kirim pesan sementara dulu, lalu update dengan posisi nyata setelah job masuk
+            pmsg    = await update.message.reply_text("⏳ Memproses...", parse_mode=ParseMode.HTML)
             pmsg_id = pmsg.message_id
 
             async def _edit_s(text: str, html: bool = False):
@@ -204,7 +196,26 @@ def setup(app):
                     QuotaService.add_quota(uid, 1)
                     await _edit_s(f"❌ Terjadi kesalahan tak terduga: {e}")
 
-            queue_manager.add_job(single_job, is_prem)
+            pos = queue_manager.add_job(single_job, is_prem, uid)
+            if pos == 0:
+                # Race condition: antrian penuh setelah can_add lolos
+                QuotaService.add_quota(uid, 1)
+                await _edit_s("❌ Server sedang sibuk, coba lagi nanti.")
+                return
+
+            if pos > 1:
+                await _edit_s(
+                    f"📋 <b>Masuk antrian!</b>\n"
+                    f"Posisi kamu: <b>ke-{pos}</b> dalam antrian\n"
+                    f"⏳ Download akan dimulai setelah giliran tiba.\n\n"
+                    f"📦 Sisa quota: <b>{quota_disp}</b>",
+                    html=True,
+                )
+            else:
+                await _edit_s(
+                    f"⏳ Giliran kamu berikutnya!\n📦 Sisa quota: <b>{quota_disp}</b>",
+                    html=True,
+                )
             return
 
         # ── Dua link → mode bulk ──────────────────────────────────────────
@@ -260,21 +271,8 @@ def setup(app):
 
             q          = QuotaService.get_quota(uid)
             quota_disp = "∞ Unlimited" if q.get("unlimited") else str(q["total"])
-            pos        = queue_manager.size["premium" if is_prem else "regular"]
-            if pos > 0:
-                init_text = (
-                    f"📋 <b>Masuk antrian!</b>\n"
-                    f"Posisi kamu: <b>ke-{pos + 1}</b>\n"
-                    f"⏳ {count} pesan akan diunduh setelah giliran tiba.\n\n"
-                    f"📦 Sisa quota: <b>{quota_disp}</b>"
-                )
-            else:
-                init_text = (
-                    f"⏳ <b>Mengunduh {count} pesan... (0/{count})</b>\n"
-                    f"📦 Sisa quota: {quota_disp}\n\n"
-                    "<i>Ketik /canceldownload untuk membatalkan.</i>"
-                )
-            pmsg    = await update.message.reply_text(init_text, parse_mode=ParseMode.HTML)
+
+            pmsg    = await update.message.reply_text("⏳ Memproses...", parse_mode=ParseMode.HTML)
             pmsg_id = pmsg.message_id
 
             async def _edit_b(text: str):
@@ -446,7 +444,45 @@ def setup(app):
                     QuotaService.add_quota(uid, count)
                     await _edit_b(f"❌ Terjadi kesalahan tak terduga: {e}")
 
-            queue_manager.add_job(bulk_job, is_prem)
+            pos = queue_manager.add_job(bulk_job, is_prem, uid)
+            if pos == 0:
+                QuotaService.add_quota(uid, count)
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id, message_id=pmsg_id,
+                        text="❌ Server sedang sibuk, coba lagi nanti.",
+                    )
+                except TgBadRequest:
+                    pass
+                return
+
+            if pos > 1:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id, message_id=pmsg_id,
+                        text=(
+                            f"📋 <b>Masuk antrian!</b>\n"
+                            f"Posisi kamu: <b>ke-{pos}</b> dalam antrian\n"
+                            f"⏳ {count} pesan akan diunduh setelah giliran tiba.\n\n"
+                            f"📦 Sisa quota: <b>{quota_disp}</b>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                except TgBadRequest:
+                    pass
+            else:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id, message_id=pmsg_id,
+                        text=(
+                            f"⏳ <b>Mengunduh {count} pesan... (0/{count})</b>\n"
+                            f"📦 Sisa quota: {quota_disp}\n\n"
+                            "<i>Ketik /canceldownload untuk membatalkan.</i>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                except TgBadRequest:
+                    pass
             return
 
         # ── Lebih dari 2 argumen ──────────────────────────────────────────
@@ -618,7 +654,13 @@ def setup(app):
                 QuotaService.add_quota(uid, n)
                 await _edit_r(f"❌ Terjadi kesalahan tak terduga: {e}")
 
-        queue_manager.add_job(retry_job, is_prem)
+        pos_r = queue_manager.add_job(retry_job, is_prem, uid)
+        if pos_r == 0:
+            QuotaService.add_quota(uid, n)
+            await context.bot.send_message(
+                chat_id, "❌ Server sedang sibuk, coba lagi nanti."
+            )
+            return
 
     app.add_handler(CommandHandler("canceldownload", cancel_download))
     app.add_handler(CommandHandler("get",            get_cmd))
