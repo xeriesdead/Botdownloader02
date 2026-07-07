@@ -26,7 +26,10 @@ from telegram import (
     InputMediaVideo,
 )
 from telegram.error import BadRequest, Forbidden
-from config import MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB
+from config import (
+    MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB,
+    MAX_FILE_SIZE_BYTES_PREMIUM, MAX_FILE_SIZE_MB_PREMIUM,
+)
 from logger import logger
 
 MAX_RETRIES = 2
@@ -633,6 +636,7 @@ class SafeForward:
     async def run(
         client, bot, user_chat_id: int, chat, msg_id: int,
         on_progress=None,
+        is_premium: bool = False,
     ) -> tuple[bool, str | None]:
         """
         Ambil pesan dari `chat`/`msg_id` dan kirim ke `user_chat_id` via PTB bot.
@@ -674,12 +678,14 @@ class SafeForward:
             )
 
         # ── Langkah 3: Cek ukuran file terhadap hard limit ───────────────
-        file_size = _get_file_size(msg)
-        if file_size and file_size > MAX_FILE_SIZE_BYTES:
+        file_size  = _get_file_size(msg)
+        size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
+        size_label = f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)" if is_premium else f"{MAX_FILE_SIZE_MB} MB"
+        if file_size and file_size > size_limit:
             size_str = _fmt_size(file_size)
             return False, (
                 f"File terlalu besar ({size_str}). "
-                f"Batas maksimal: {MAX_FILE_SIZE_MB} MB."
+                f"Batas maksimal: {size_label}."
             )
 
         is_large = bool(file_size and file_size > _BOT_API_UPLOAD_LIMIT)
