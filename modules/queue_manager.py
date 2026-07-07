@@ -14,6 +14,9 @@ class QueueManager:
         self.premium_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         self.running       = False
         self._active_count = 0
+        # Daftar user_id dalam antrian (urutan masuk → bisa cek posisi)
+        self._regular_tracking: list[int] = []
+        self._premium_tracking: list[int] = []
 
     async def _worker(self):
         premium_counter = 0
@@ -72,15 +75,42 @@ class QueueManager:
             return not self.premium_queue.full()
         return not self.regular_queue.full()
 
-    def add_job(self, job, is_premium: bool = False) -> bool:
+    def add_job(self, job, is_premium: bool = False, user_id: int = 0) -> int:
+        """
+        Tambah job ke antrian.
+        Mengembalikan posisi 1-based dalam antrian (1 = giliran berikutnya).
+        Mengembalikan 0 jika antrian penuh (gagal ditambahkan).
+        """
+        track = self._premium_tracking if is_premium else self._regular_tracking
+        queue = self.premium_queue   if is_premium else self.regular_queue
+
+        async def _tracked():
+            # Hapus dari tracking saat worker mulai memproses job ini
+            if user_id and user_id in track:
+                track.remove(user_id)
+            await job()
+
         try:
-            if is_premium:
-                self.premium_queue.put_nowait(job)
-            else:
-                self.regular_queue.put_nowait(job)
-            return True
+            # Enqueue dulu — kalau gagal (QueueFull), tracking tidak tersentuh
+            queue.put_nowait(_tracked)
         except asyncio.QueueFull:
-            return False
+            return 0  # gagal, tidak ada yang perlu di-rollback
+
+        # Append tracking hanya setelah enqueue berhasil
+        if user_id:
+            track.append(user_id)
+        return len(track)  # posisi 1-based
+
+    def get_position(self, user_id: int, is_premium: bool = False) -> int:
+        """
+        Kembalikan posisi 1-based user dalam antrian.
+        0 = tidak ada job user ini dalam antrian.
+        """
+        track = self._premium_tracking if is_premium else self._regular_tracking
+        try:
+            return track.index(user_id) + 1
+        except ValueError:
+            return 0
 
     @property
     def active(self) -> int:
