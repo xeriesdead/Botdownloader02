@@ -9,7 +9,7 @@ from modules.queue_manager import queue_manager
 from modules.session_manager import session_manager
 from modules.link_parser import parse_telegram_link
 from modules.quota_service import QuotaService
-from modules.safe_forward import SafeForward
+from modules.safe_forward import SafeForward, check_channel_access
 from modules.channel_guard import require_member
 from modules.activity_log import log as activity_log
 from database.db import db
@@ -125,6 +125,13 @@ def setup(app):
                 return await update.message.reply_text(
                     "❌ Kamu belum login.\nGunakan /login untuk menghubungkan akun Telegram."
                 )
+
+            # ── Pre-flight: cek akses channel SEBELUM potong quota ────────
+            uc_check = await session_manager.get(uid)
+            if uc_check:
+                ok_access, err_access = await check_channel_access(uc_check, chat)
+                if not ok_access:
+                    return await update.message.reply_text(err_access, parse_mode=ParseMode.HTML)
 
             if not QuotaService.use_quota(uid):
                 return await update.message.reply_text(
@@ -249,6 +256,13 @@ def setup(app):
                 return await update.message.reply_text(
                     "❌ Kamu belum login.\nGunakan /login untuk menghubungkan akun Telegram."
                 )
+
+            # ── Pre-flight: cek akses channel SEBELUM potong quota ────────
+            uc_check = await session_manager.get(uid)
+            if uc_check:
+                ok_access, err_access = await check_channel_access(uc_check, chat_a)
+                if not ok_access:
+                    return await update.message.reply_text(err_access, parse_mode=ParseMode.HTML)
 
             quota = QuotaService.get_quota(uid)
             if not quota.get("unlimited") and quota["total"] < count:
