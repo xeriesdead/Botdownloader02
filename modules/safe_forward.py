@@ -161,8 +161,41 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
 
     return _cb
 
-_PEER_RESOLVE_TIMEOUT = 20   # detik — batas waktu resolve peer & get_chat
-_MSG_FETCH_TIMEOUT    = 25   # detik — batas waktu get_messages
+_PEER_RESOLVE_TIMEOUT  = 20   # detik — batas waktu resolve peer & get_chat
+_MSG_FETCH_TIMEOUT     = 25   # detik — batas waktu get_messages
+_ACCESS_CHECK_TIMEOUT  = 12   # detik — batas waktu pre-flight cek akses channel
+
+
+async def check_channel_access(client, chat) -> tuple[bool, str]:
+    """
+    Pre-flight: cek apakah client bisa mengakses channel/grup.
+    Dipanggil SEBELUM quota dipotong agar user tidak kehilangan quota
+    jika akun belum bergabung ke channel target.
+
+    Return (True, "") jika bisa diakses, (False, pesan_error) jika tidak.
+    """
+    label = f"ID {chat}" if isinstance(chat, int) else str(chat)
+    try:
+        await asyncio.wait_for(client.get_chat(chat), timeout=_ACCESS_CHECK_TIMEOUT)
+        return True, ""
+    except asyncio.TimeoutError:
+        return False, (
+            "⏳ <b>Tidak bisa memeriksa channel (timeout).</b>\n"
+            "Pastikan akun sudah bergabung, lalu coba lagi."
+        )
+    except _PEER_ERRORS:
+        return False, (
+            "🔒 <b>Akses ditolak.</b>\n\n"
+            f"Akun kamu belum bergabung ke channel <code>{label}</code>.\n"
+            "Silakan join channel tersebut terlebih dahulu, lalu coba lagi."
+        )
+    except (UsernameNotOccupied, UsernameInvalid):
+        return False, f"❌ Channel <code>{label}</code> tidak ditemukan atau sudah tidak aktif."
+    except Exception as e:
+        logger.warning(f"check_channel_access({chat}): {e}")
+        # Jika cek gagal karena alasan lain (misal network), biarkan lanjut —
+        # error yang lebih spesifik akan muncul saat proses download.
+        return True, ""
 
 
 async def _is_forwards_restricted(client, chat) -> bool:
