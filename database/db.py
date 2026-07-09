@@ -43,7 +43,8 @@ class Database:
                     referrer_id    BIGINT,
                     last_reset     TEXT    DEFAULT CURRENT_DATE::TEXT,
                     banned         INTEGER DEFAULT 0,
-                    login_at       TEXT
+                    login_at       TEXT,
+                    created_at     TIMESTAMP DEFAULT NOW()
                 );
                 CREATE TABLE IF NOT EXISTS activity_log (
                     id         SERIAL PRIMARY KEY,
@@ -59,6 +60,7 @@ class Database:
                     key   TEXT PRIMARY KEY,
                     value TEXT
                 );
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
             """)
 
     # ------------------------------------------------------------------ #
@@ -112,6 +114,53 @@ class Database:
 
     def get_all_users(self):
         return self.fetchall("SELECT user_id FROM users")
+
+    def get_referrals(self, referrer_id: int, limit: int = 20):
+        """
+        Daftar user yang direferensikan oleh referrer_id, terbaru dulu (dibatasi `limit`).
+        Return list of dict: [{"user_id": ..., "username": ..., "created_at": ...}, ...]
+        """
+        return self.fetchall(
+            "SELECT user_id, username, created_at FROM users "
+            "WHERE referrer_id = ? ORDER BY created_at DESC LIMIT ?",
+            (referrer_id, limit),
+        )
+
+    def count_referrals(self, referrer_id: int) -> int:
+        row = self.fetchone(
+            "SELECT COUNT(*) AS cnt FROM users WHERE referrer_id = ?",
+            (referrer_id,),
+        )
+        return row["cnt"] if row else 0
+
+    def get_monthly_user_counts(self, months: int = 12):
+        """
+        Jumlah user baru per bulan, N bulan terakhir (termasuk bulan ini).
+        Bulan tanpa user baru tetap muncul dengan count=0 (via generate_series).
+        Return list of dict: [{"month": "2026-07", "count": 12}, ...] urut lama→baru.
+
+        Catatan: kolom created_at ditambahkan lewat migrasi ALTER TABLE. User yang
+        sudah ada sebelum migrasi akan tercatat created_at = waktu migrasi berjalan,
+        bukan waktu asli mereka daftar. Jadi data bulan-bulan sebelum migrasi tidak akurat.
+        """
+        months = max(1, int(months))
+        rows = self.fetchall(
+            """
+            SELECT to_char(gs.month, 'YYYY-MM') AS month,
+                   COUNT(u.user_id) AS count
+            FROM generate_series(
+                     date_trunc('month', NOW()) - (%s || ' months')::interval,
+                     date_trunc('month', NOW()),
+                     '1 month'::interval
+                 ) AS gs(month)
+            LEFT JOIN users u
+                   ON to_char(u.created_at, 'YYYY-MM') = to_char(gs.month, 'YYYY-MM')
+            GROUP BY gs.month
+            ORDER BY gs.month ASC
+            """,
+            (months - 1,),
+        )
+        return [{"month": r["month"], "count": r["count"]} for r in rows]
 
     def update(self, query: str, params: tuple):
         return self.execute(query, params)
