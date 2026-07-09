@@ -5,6 +5,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from modules.quota_service import DEFAULT_DAILY_QUOTA
 from modules.channel_guard import require_member
 from config import MAX_FILE_SIZE_MB, MAX_FILE_SIZE_MB_PREMIUM
+from database.db import db
 
 
 def setup(app):
@@ -45,6 +46,9 @@ def setup(app):
         me   = await context.bot.get_me()
         link = f"https://t.me/{me.username}?start={uid}"
 
+        referrals = db.get_referrals(uid, limit=20)
+        total_referrals = db.count_referrals(uid)
+
         info_text = (
             "🎁 <b>Program Referral</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -54,7 +58,27 @@ def setup(app):
             "  • +3 bonus quota setiap kali teman bergabung\n"
             "  • Tidak ada batas jumlah referral\n"
             "  • Bonus quota masuk secara otomatis\n\n"
+
+            f"👥 <b>Total referral Anda: {total_referrals}</b>\n"
         )
+
+        if referrals:
+            lines = []
+            for i, r in enumerate(referrals, start=1):
+                uname = r.get("username") or ""
+                label = f"@{uname}" if uname else f"<code>{r['user_id']}</code>"
+                joined = r.get("created_at")
+                if hasattr(joined, "strftime"):
+                    joined_str = joined.strftime("%d %b %Y")
+                elif joined:
+                    joined_str = str(joined)
+                else:
+                    joined_str = "-"
+                lines.append(f"  {i}. {label} — {joined_str}")
+            info_text += "\n" + "\n".join(lines) + "\n"
+            if total_referrals > len(referrals):
+                info_text += f"  ...dan {total_referrals - len(referrals)} lainnya\n"
+            info_text += "\n"
 
         promo_caption = (
             "📥 <b>Bot Downloader — Unduh File Telegram dengan Mudah</b>\n\n"
