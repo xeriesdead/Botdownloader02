@@ -4,6 +4,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from modules.quota_service import DEFAULT_DAILY_QUOTA
 from modules.channel_guard import require_member
+from config import MAX_FILE_SIZE_MB, MAX_FILE_SIZE_MB_PREMIUM
 
 
 def setup(app):
@@ -20,10 +21,12 @@ def setup(app):
 
             "🆓 <b>FREE</b>\n"
             f"  ├ Quota harian  : <code>{DEFAULT_DAILY_QUOTA} per hari</code>\n"
+            f"  ├ Batas ukuran  : <code>{MAX_FILE_SIZE_MB} MB per file</code>\n"
             "  └ Antrian       : Normal\n\n"
 
             "👑 <b>PREMIUM</b>\n"
             "  ├ Quota harian  : <code>∞ Unlimited</code>\n"
+            f"  ├ Batas ukuran  : <code>{MAX_FILE_SIZE_MB_PREMIUM} MB (2 GB) per file</code>\n"
             "  └ Antrian       : Prioritas Tinggi\n\n"
 
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
