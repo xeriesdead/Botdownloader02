@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "_FXbhub8tbtG6xed3MNZC"
+uri = "file://exports/telegram-bot-webhook.zip"
+type = "unspecified"
+title = "Telegram bot - webhook/Railway-ready (zip)"

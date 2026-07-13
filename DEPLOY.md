@@ -115,3 +115,69 @@ sedang antre bisa hilang. Untuk keandalan penuh, pertimbangkan:
 Ini trade-off yang disengaja untuk task ini — konversi queue menjadi model
 per-request penuh adalah perubahan arsitektur terpisah, di luar cakupan
 task ini.
+
+---
+
+# Alternatif: Deploy ke Railway
+
+`webhook_server.py` + `Dockerfile` yang sama juga bisa langsung dipakai di
+Railway — Railway mendeteksi `Dockerfile` secara otomatis dari repo GitHub.
+Perbedaan dari Cloud Run cuma di 2 hal: cara set env var, dan cara
+menjadwalkan 3 tugas periodik (Railway tidak punya Cloud Scheduler bawaan).
+
+## 1. File yang perlu ada di repo GitHub kamu
+
+Ini semua file yang ditambahkan/diubah untuk mode webhook — pastikan semuanya
+ter-commit ke repo:
+
+- **Baru:** `webhook_server.py`, `Dockerfile`, `DEPLOY.md`
+- **Diubah:** `modules/cleanup.py`, `modules/daily_reset_notifier.py`, `modules/premium_expiry.py`
+- **Tidak berubah, tapi tetap wajib ada:** `main.py`, `config.py`, `logger.py`, `requirements.txt`, seluruh isi `handlers/`, `modules/`, `database/`
+
+`main.py` (mode polling lama) sengaja dibiarkan apa adanya dan tidak dipakai
+lagi di Railway — cukup biarkan ada di repo, tidak perlu dihapus.
+
+## 2. Deploy di Railway
+
+1. Push semua file di atas ke repo GitHub kamu.
+2. Di Railway: **New Project → Deploy from GitHub repo**, pilih repo ini.
+   Railway otomatis mendeteksi `Dockerfile` dan menjalankan `CMD ["python", "webhook_server.py"]`.
+3. Di tab **Variables**, tambahkan semua secrets yang sama seperti di atas:
+   `BOT_TOKEN`, `API_ID`, `API_HASH`, `DATABASE_URL`, `WEBHOOK_SECRET`, `TASKS_SECRET` (+ opsional lain).
+4. Railway otomatis memberi domain publik (tab **Settings → Networking →
+   Generate Domain**). Catat URL-nya, misal `https://xxxx.up.railway.app`.
+5. Pastikan **PORT** — Railway mengisi env var `PORT` otomatis; `webhook_server.py`
+   sudah membaca `PORT` dari environment, jadi tidak perlu diubah manual.
+
+## 3. Daftarkan webhook (sama seperti Cloud Run)
+
+```bash
+curl -X POST "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \
+  -d "url=https://<RAILWAY_DOMAIN>/webhook/<WEBHOOK_SECRET>"
+```
+
+## 4. Jadwalkan 3 tugas periodik tanpa Cloud Scheduler
+
+Railway tidak punya scheduler bawaan yang gratis. Pakai layanan cron gratis
+eksternal, misalnya **cron-job.org** (gratis, tanpa kartu kredit) untuk
+memanggil 3 endpoint berikut secara berkala dengan header
+`X-Tasks-Secret: <TASKS_SECRET>`:
+
+| Endpoint | Jadwal disarankan |
+|---|---|
+| `POST https://<RAILWAY_DOMAIN>/tasks/cleanup` | setiap 6 jam |
+| `POST https://<RAILWAY_DOMAIN>/tasks/daily-reset` | setiap 15 menit |
+| `POST https://<RAILWAY_DOMAIN>/tasks/premium-expiry` | setiap jam |
+
+cron-job.org mendukung custom header di form pembuatan job, jadi tinggal
+isi URL, method POST, jadwal, dan header di atas.
+
+## 5. Catatan biaya Railway
+
+Railway tidak benar-benar "serverless" (scale-to-zero) untuk service
+container biasa seperti ini — service akan tetap berjalan terus selama
+project aktif, dan dikenai biaya berdasarkan pemakaian CPU/RAM/jam setelah
+kredit gratis bulanan habis. Ini bukan keterbatasan dari kode bot, melainkan
+model harga Railway. Jika target utamanya benar-benar $0 tanpa batas waktu,
+Google Cloud Run (bagian atas dokumen ini) lebih cocok karena betul-betul
+scale-to-zero saat tidak ada traffic.
