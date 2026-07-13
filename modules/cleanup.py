@@ -43,14 +43,25 @@ def _cleanup_old_logs() -> int:
     return removed
 
 
+def run_cleanup_once() -> dict:
+    """
+    Jalankan satu kali pass cleanup (downloads + log lama).
+    Dipakai baik oleh loop in-process (mode polling) maupun endpoint HTTP
+    yang dipicu scheduler eksternal (mode webhook/serverless).
+    """
+    dl = _cleanup_downloads()
+    lg = _cleanup_old_logs()
+    if dl or lg:
+        logger.info(f"[cleanup] Selesai — downloads dihapus: {dl}, log lama dihapus: {lg}")
+    return {"downloads_removed": dl, "logs_removed": lg}
+
+
 async def run_cleanup_loop():
+    """Mode polling: loop in-memory yang jalan selama proses hidup."""
     logger.info("[cleanup] Auto-cleanup dimulai (interval: setiap 6 jam)")
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL_HOURS * 3600)
         try:
-            dl = _cleanup_downloads()
-            lg = _cleanup_old_logs()
-            if dl or lg:
-                logger.info(f"[cleanup] Selesai — downloads dihapus: {dl}, log lama dihapus: {lg}")
+            run_cleanup_once()
         except Exception as e:
             logger.error(f"[cleanup] Error saat cleanup: {e}")

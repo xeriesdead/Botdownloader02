@@ -61,8 +61,24 @@ async def _run_reset_and_notify(bot) -> tuple[int, int]:
     return total, notified
 
 
+async def run_daily_reset_once(bot) -> tuple[int, int]:
+    """
+    Jalankan satu kali pass reset quota harian + notifikasi.
+    Idempotent: user yang `last_reset` sudah hari ini otomatis di-skip,
+    jadi aman dipanggil berkali-kali oleh scheduler eksternal (mis. setiap
+    beberapa menit) di mode webhook/serverless, bukan cuma tepat tengah malam.
+    """
+    total, notified = await _run_reset_and_notify(bot)
+    if total:
+        logger.info(
+            f"[daily_reset] Selesai — {total} user di-reset, "
+            f"{notified} notifikasi terkirim"
+        )
+    return total, notified
+
+
 async def run_daily_reset_loop(bot):
-    """Loop yang berjalan selamanya: tidur hingga tengah malam, lalu reset & notifikasi."""
+    """Mode polling: loop in-memory yang tidur hingga tengah malam, lalu reset & notifikasi."""
     wait = _seconds_until_midnight()
     h = int(wait // 3600)
     m = int((wait % 3600) // 60)
@@ -71,11 +87,7 @@ async def run_daily_reset_loop(bot):
     while True:
         await asyncio.sleep(_seconds_until_midnight())
         try:
-            total, notified = await _run_reset_and_notify(bot)
-            logger.info(
-                f"[daily_reset] Selesai — {total} user di-reset, "
-                f"{notified} notifikasi terkirim"
-            )
+            await run_daily_reset_once(bot)
         except Exception as e:
             logger.error(f"[daily_reset] Error saat reset harian: {e}")
         # Tunggu 70 detik sebelum loop berikutnya agar tidak trigger dua kali di menit yang sama

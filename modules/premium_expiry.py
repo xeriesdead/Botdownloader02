@@ -47,22 +47,33 @@ async def _notify_expired(bot, user_id: int):
         pass
 
 
+async def run_premium_expiry_once(bot) -> int:
+    """
+    Jalankan satu kali pass cek & revoke premium kadaluwarsa.
+    Aman dipanggil berkali-kali (idempotent per user, karena user yang sudah
+    di-revoke tidak lagi match query `premium = 1`) oleh scheduler eksternal
+    di mode webhook/serverless.
+    """
+    expired_ids = _find_expired_premium()
+    if not expired_ids:
+        return 0
+
+    logger.info(f"[premium_expiry] Ditemukan {len(expired_ids)} premium kadaluwarsa, merevoking...")
+    for uid in expired_ids:
+        _revoke_premium(uid)
+        await _notify_expired(bot, uid)
+        await asyncio.sleep(_SEND_DELAY)
+
+    logger.info(f"[premium_expiry] Selesai — {len(expired_ids)} akun premium di-revoke")
+    return len(expired_ids)
+
+
 async def run_premium_expiry_loop(bot):
-    """Loop yang berjalan setiap jam: cek & revoke premium yang sudah kadaluwarsa."""
+    """Mode polling: loop in-memory yang jalan setiap jam."""
     logger.info(f"[premium_expiry] Auto-revoke premium dimulai (interval: setiap {_CHECK_INTERVAL_HOURS} jam)")
     while True:
         await asyncio.sleep(_CHECK_INTERVAL_HOURS * 3600)
         try:
-            expired_ids = _find_expired_premium()
-            if not expired_ids:
-                continue
-
-            logger.info(f"[premium_expiry] Ditemukan {len(expired_ids)} premium kadaluwarsa, merevoking...")
-            for uid in expired_ids:
-                _revoke_premium(uid)
-                await _notify_expired(bot, uid)
-                await asyncio.sleep(_SEND_DELAY)
-
-            logger.info(f"[premium_expiry] Selesai — {len(expired_ids)} akun premium di-revoke")
+            await run_premium_expiry_once(bot)
         except Exception as e:
             logger.error(f"[premium_expiry] Error: {e}")
