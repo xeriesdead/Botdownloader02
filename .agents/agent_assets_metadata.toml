@@ -6,3 +6,9 @@ id = "_FXbhub8tbtG6xed3MNZC"
 uri = "file://exports/telegram-bot-webhook.zip"
 type = "unspecified"
 title = "Telegram bot - webhook/Railway-ready (zip)"
+
+[[outputs]]
+id = "LZYf4y69d64Mw3DM3g-od"
+uri = "file://exports/telegram-bot-update.zip"
+type = "unspecified"
+title = "Telegram bot - update link_parser (t.me + telegram.me)"
