@@ -1,7 +1,7 @@
 import re
 
-_PRIVATE = re.compile(r"t\.me/c/(\d+)/(\d+)")
-_PUBLIC  = re.compile(r"t\.me/([A-Za-z0-9_]+)/(\d+)")
+_PRIVATE = re.compile(r"(?:t\.me|telegram\.me)/c/(\d+)/(\d+)")
+_PUBLIC  = re.compile(r"(?:t\.me|telegram\.me)/([A-Za-z0-9_]+)/(\d+)")
 
 
 def parse_telegram_link(link: str):
@@ -11,9 +11,11 @@ def parse_telegram_link(link: str):
     Public → chat berupa '@username'.
     Gagal → (None, None).
 
-    Format yang didukung:
+    Format yang didukung (domain t.me maupun telegram.me):
       t.me/username/123              → public, msg 123
       t.me/c/1234567890/123         → private, msg 123
+      telegram.me/username/123      → public, msg 123
+      telegram.me/c/1234567890/123  → private, msg 123
     """
     m = _PRIVATE.search(link)
     if m:
