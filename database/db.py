@@ -27,6 +27,21 @@ class Database:
         self.conn.autocommit = True
         self._init_db()
 
+    def _ensure_connection(self):
+        """Reconnect otomatis jika koneksi ke PostgreSQL sudah putus (idle timeout, dll)."""
+        try:
+            # poll() akan raise OperationalError jika koneksi mati
+            self.conn.poll()
+            if self.conn.closed:
+                raise psycopg2.OperationalError("connection closed")
+        except Exception:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            self.conn = psycopg2.connect(self.dsn)
+            self.conn.autocommit = True
+
     def _init_db(self):
         with self.lock, self.conn.cursor() as cur:
             cur.execute("""
@@ -69,7 +84,15 @@ class Database:
 
     def execute(self, query: str, params: tuple = ()) -> int:
         with self.lock:
+            self._ensure_connection()
             try:
+                with self.conn.cursor() as cur:
+                    cur.execute(_to_pg(query), params)
+                    return cur.rowcount
+            except psycopg2.OperationalError:
+                # Koneksi mati di tengah query — reconnect sekali lagi lalu retry
+                self.conn = psycopg2.connect(self.dsn)
+                self.conn.autocommit = True
                 with self.conn.cursor() as cur:
                     cur.execute(_to_pg(query), params)
                     return cur.rowcount
@@ -79,7 +102,15 @@ class Database:
 
     def fetchone(self, query: str, params: tuple = ()):
         with self.lock:
+            self._ensure_connection()
             try:
+                with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(_to_pg(query), params)
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+            except psycopg2.OperationalError:
+                self.conn = psycopg2.connect(self.dsn)
+                self.conn.autocommit = True
                 with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     cur.execute(_to_pg(query), params)
                     row = cur.fetchone()
@@ -90,7 +121,14 @@ class Database:
 
     def fetchall(self, query: str, params: tuple = ()):
         with self.lock:
+            self._ensure_connection()
             try:
+                with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(_to_pg(query), params)
+                    return [dict(r) for r in cur.fetchall()]
+            except psycopg2.OperationalError:
+                self.conn = psycopg2.connect(self.dsn)
+                self.conn.autocommit = True
                 with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     cur.execute(_to_pg(query), params)
                     return [dict(r) for r in cur.fetchall()]
