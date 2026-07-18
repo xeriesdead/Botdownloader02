@@ -348,23 +348,17 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
 async def _pyrogram_copy_with_notice(client, bot, msg, user_chat_id: int, file_size: int):
     """
     Fallback untuk file besar (>50 MB) di channel private yang TIDAK restricted:
-    Pyrogram meng-copy ke Saved Messages user + bot mengirim notifikasi.
+    Pyrogram meng-copy langsung ke chat bot user via MTProto (bypass batas 50 MB Bot API).
     """
-    await msg.copy(user_chat_id)
-    await bot.send_message(
-        user_chat_id,
-        f"ℹ️ File berukuran <b>{_fmt_size(file_size)}</b> dikirim ke "
-        "<b>Saved Messages</b> karena channel bersifat private dan "
-        "melebihi batas upload Bot API (50 MB).",
-        parse_mode="HTML",
-    )
+    bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+    await msg.copy(bot_peer)
 
 
 async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                                             file_size: int, on_progress=None):
     """
     Untuk file besar (>50 MB) dari channel restricted:
-    Download file via Pyrogram lalu upload ulang ke Saved Messages user via Pyrogram (MTProto).
+    Download file via Pyrogram lalu upload ulang langsung ke chat bot user via Pyrogram (MTProto).
     Bypass sekaligus: batas 50 MB Bot API + larangan forward/copy dari channel restricted.
     File bisa sampai 1 GB (sesuai MAX_FILE_SIZE_BYTES di config).
     on_progress: async callable(text: str) untuk update pesan status (opsional).
@@ -376,33 +370,31 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
     if not path:
         raise RuntimeError("Download gagal, file tidak tersedia.")
 
+    # Kirim ke chat bot (bukan Saved Messages).
+    # Dari sudut pandang Pyrogram (login sebagai user), mengirim ke @bot_username
+    # membuat file muncul langsung di chat antara user dan bot.
+    bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+
     ul_cb = _make_pyrogram_progress(on_progress, "Mengirim", file_size) if show_progress else None
     caption = _build_caption(msg.caption or "")
     try:
         if msg.photo:
-            await client.send_photo(user_chat_id, path, caption=caption, progress=ul_cb)
+            await client.send_photo(bot_peer, path, caption=caption, progress=ul_cb)
         elif msg.video:
-            await client.send_video(user_chat_id, path, caption=caption,
+            await client.send_video(bot_peer, path, caption=caption,
                                     supports_streaming=True, progress=ul_cb)
         elif msg.audio:
-            await client.send_audio(user_chat_id, path, caption=caption, progress=ul_cb)
+            await client.send_audio(bot_peer, path, caption=caption, progress=ul_cb)
         elif msg.voice:
-            await client.send_voice(user_chat_id, path, caption=caption, progress=ul_cb)
+            await client.send_voice(bot_peer, path, caption=caption, progress=ul_cb)
         elif msg.video_note:
-            await client.send_video_note(user_chat_id, path, progress=ul_cb)
+            await client.send_video_note(bot_peer, path, progress=ul_cb)
         elif msg.animation:
-            await client.send_animation(user_chat_id, path, caption=caption, progress=ul_cb)
+            await client.send_animation(bot_peer, path, caption=caption, progress=ul_cb)
         elif msg.sticker:
-            await client.send_sticker(user_chat_id, path, progress=ul_cb)
+            await client.send_sticker(bot_peer, path, progress=ul_cb)
         else:
-            await client.send_document(user_chat_id, path, caption=caption, progress=ul_cb)
-
-        await bot.send_message(
-            user_chat_id,
-            f"ℹ️ File berukuran <b>{_fmt_size(file_size)}</b> dikirim ke "
-            "<b>Saved Messages</b> karena melebihi batas upload Bot API (50 MB).",
-            parse_mode="HTML",
-        )
+            await client.send_document(bot_peer, path, caption=caption, progress=ul_cb)
     finally:
         try:
             os.remove(path)
@@ -506,23 +498,25 @@ async def _send_album_individually(
         try:
             caption   = _build_caption(m.caption or "")
             file_size = _get_file_size(m) or 0
+            bot_peer  = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
             if file_size > _BOT_API_UPLOAD_LIMIT:
-                # File terlalu besar untuk Bot API — kirim via Pyrogram MTProto
+                # File terlalu besar untuk Bot API — kirim langsung ke chat bot
+                # via Pyrogram MTProto (bypass batas 50 MB, tanpa Saved Messages)
                 if m.photo:
-                    await client.send_photo(user_chat_id, path, caption=caption)
+                    await client.send_photo(bot_peer, path, caption=caption)
                 elif m.video:
-                    await client.send_video(user_chat_id, path, caption=caption,
+                    await client.send_video(bot_peer, path, caption=caption,
                                             supports_streaming=True)
                 elif m.audio:
-                    await client.send_audio(user_chat_id, path, caption=caption)
+                    await client.send_audio(bot_peer, path, caption=caption)
                 elif m.voice:
-                    await client.send_voice(user_chat_id, path, caption=caption)
+                    await client.send_voice(bot_peer, path, caption=caption)
                 elif m.video_note:
-                    await client.send_video_note(user_chat_id, path)
+                    await client.send_video_note(bot_peer, path)
                 elif m.animation:
-                    await client.send_animation(user_chat_id, path, caption=caption)
+                    await client.send_animation(bot_peer, path, caption=caption)
                 else:
-                    await client.send_document(user_chat_id, path, caption=caption)
+                    await client.send_document(bot_peer, path, caption=caption)
                 large_sent += 1
             else:
                 with open(path, "rb") as f:
@@ -549,18 +543,6 @@ async def _send_album_individually(
 
     if sent == 0:
         return False, "Semua file dalam album gagal dikirim."
-
-    # Beritahu user jika ada file besar yang dikirim ke Saved Messages
-    if large_sent > 0:
-        try:
-            await bot.send_message(
-                user_chat_id,
-                f"ℹ️ <b>{large_sent} file</b> dalam album berukuran >50 MB dikirim ke "
-                "<b>Saved Messages</b> (melebihi batas upload Bot API).",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
 
     return True, None
 
