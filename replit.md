@@ -11,7 +11,7 @@ tidak bisa akses), disimpan di PostgreSQL.
 Ada dua entry point, untuk dua mode berbeda:
 
 - **`main.py`** — mode polling (long-polling ke Telegram API). Proses harus
-  hidup terus-menerus. Cocok untuk development lokal atau hosting always-on.
+  hidup terus-menerus. Ini adalah mode produksi yang dipakai di Railway.
 - **`webhook_server.py`** — mode webhook (serverless-ready). Menerima update
   Telegram lewat HTTP, dan 3 loop latar belakang (`cleanup`, `daily_reset`,
   `premium_expiry`) diganti jadi endpoint `/tasks/*` yang dipicu scheduler
@@ -19,13 +19,12 @@ Ada dua entry point, untuk dua mode berbeda:
   lihat `DEPLOY.md` untuk panduan lengkap (secrets yang dibutuhkan, cara
   daftarkan webhook, dan cara setup Cloud Scheduler).
 
-Kedua mode butuh secrets berikut di environment: `BOT_TOKEN`, `API_ID`,
-`API_HASH`, `DATABASE_URL`. Mode webhook tambahan butuh `WEBHOOK_SECRET` dan
-`TASKS_SECRET`. Lihat `config.py` untuk daftar lengkap env var opsional.
+Mode polling membutuhkan secrets berikut di environment: `BOT_TOKEN`, `API_ID`,
+`API_HASH`, `DATABASE_URL`. `WEBHOOK_SECRET` dan `TASKS_SECRET` tidak diperlukan
+untuk mode polling. Lihat `config.py` untuk daftar lengkap env var opsional.
 
 ## User preferences
 
-- Bot ini akan dideploy ke Google Cloud Run (bukan Railway/Cloudflare
-  Workers), karena user ingin hosting gratis dan bot punya dependency
-  native (tgcrypto, pyrofork, psycopg2-binary) yang tidak bisa jalan di
-  platform edge-serverless murni seperti Cloudflare Workers.
+- Bot ini dideploy ke Railway dalam mode polling always-on karena bot perlu
+  proses yang terus berjalan dan memiliki dependency native (tgcrypto,
+  pyrofork, psycopg2-binary).
