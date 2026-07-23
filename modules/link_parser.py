@@ -26,3 +26,8 @@ def parse_telegram_link(link: str):
         return f"@{m.group(1)}", int(m.group(2))
 
     return None, None
+
+
+def is_public_chat(chat) -> bool:
+    """True untuk chat publik yang direpresentasikan sebagai @username."""
+    return isinstance(chat, str) and chat.startswith("@")

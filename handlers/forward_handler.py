@@ -7,7 +7,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from modules.queue_manager import queue_manager
 from modules.session_manager import session_manager
-from modules.link_parser import parse_telegram_link
+from modules.link_parser import parse_telegram_link, is_public_chat
 from modules.quota_service import QuotaService
 from modules.safe_forward import SafeForward, check_channel_access
 from modules.channel_guard import require_member
@@ -61,6 +61,10 @@ def _check_rate(uid: int) -> bool:
 def _check_logged_in(uid: int) -> bool:
     user = db.get_user(uid)
     return bool(user and user.get("session_string"))
+
+
+def _requires_user_login(chat) -> bool:
+    return not is_public_chat(chat)
 
 
 async def _quota_warn(bot, chat_id: int, uid: int):
@@ -121,13 +125,13 @@ def setup(app):
                     _LINK_INVALID_TEXT, parse_mode=ParseMode.HTML
                 )
 
-            if not _check_logged_in(uid):
+            if _requires_user_login(chat) and not _check_logged_in(uid):
                 return await update.message.reply_text(
                     "❌ Kamu belum login.\nGunakan /login untuk menghubungkan akun Telegram."
                 )
 
             # ── Pre-flight: cek akses channel SEBELUM potong quota ────────
-            uc_check = await session_manager.get(uid)
+            uc_check = await session_manager.get_for_chat(uid, chat)
             if uc_check:
                 ok_access, err_access = await check_channel_access(uc_check, chat)
                 if not ok_access:
@@ -177,10 +181,15 @@ def setup(app):
                         await _edit_s(text, html=True)
 
                     async with lock:
-                        uc = await session_manager.get(uid)
+                        uc = await session_manager.get_for_chat(uid, chat)
                         if not uc:
                             QuotaService.add_quota(uid, 1)
-                            await _edit_s("❌ Session tidak valid. Silakan /login ulang.")
+                            message = (
+                                "❌ Bot tidak bisa mengakses channel publik ini."
+                                if is_public_chat(chat)
+                                else "❌ Session tidak valid. Silakan /login ulang."
+                            )
+                            await _edit_s(message)
                             return
                         ok, reason = await SafeForward.run(
                             uc, bot, chat_id, chat, msg_id,
@@ -252,13 +261,13 @@ def setup(app):
                     parse_mode=ParseMode.HTML,
                 )
 
-            if not _check_logged_in(uid):
+            if _requires_user_login(chat_a) and not _check_logged_in(uid):
                 return await update.message.reply_text(
                     "❌ Kamu belum login.\nGunakan /login untuk menghubungkan akun Telegram."
                 )
 
             # ── Pre-flight: cek akses channel SEBELUM potong quota ────────
-            uc_check = await session_manager.get(uid)
+            uc_check = await session_manager.get_for_chat(uid, chat_a)
             if uc_check:
                 ok_access, err_access = await check_channel_access(uc_check, chat_a)
                 if not ok_access:
@@ -309,10 +318,15 @@ def setup(app):
                         "<i>Ketik /canceldownload untuk membatalkan.</i>"
                     )
                     async with lock:
-                        uc = await session_manager.get(uid)
+                        uc = await session_manager.get_for_chat(uid, chat_a)
                         if not uc:
                             QuotaService.add_quota(uid, count)
-                            await _edit_b("❌ Session tidak valid. Silakan /login ulang.")
+                            message = (
+                                "❌ Bot tidak bisa mengakses channel publik ini."
+                                if is_public_chat(chat_a)
+                                else "❌ Session tidak valid. Silakan /login ulang."
+                            )
+                            await _edit_b(message)
                             return
 
                         # Fetch semua pesan sekaligus
@@ -579,10 +593,15 @@ def setup(app):
         async def retry_job():
             try:
                 async with lock:
-                    uc = await session_manager.get(uid)
+                    uc = await session_manager.get_for_chat(uid, channel)
                     if not uc:
                         QuotaService.add_quota(uid, n)
-                        await _edit_r("❌ Session tidak valid. Silakan /login ulang.")
+                        message = (
+                            "❌ Bot tidak bisa mengakses channel publik ini."
+                            if is_public_chat(channel)
+                            else "❌ Session tidak valid. Silakan /login ulang."
+                        )
+                        await _edit_r(message)
                         return
 
                     success        = 0

@@ -1,7 +1,7 @@
 import asyncio
 from pyrogram import Client
 from pyrogram.errors import AuthKeyUnregistered, UserDeactivated, SessionRevoked
-from config import API_ID, API_HASH
+from config import API_ID, API_HASH, BOT_TOKEN
 from database.db import db
 from logger import logger
 
@@ -11,6 +11,8 @@ class SessionManager:
     def __init__(self):
         self._sessions: dict[int, Client] = {}
         self._locks: dict[int, asyncio.Lock] = {}
+        self._public_session: Client | None = None
+        self._public_lock = asyncio.Lock()
 
     def _lock(self, user_id: int) -> asyncio.Lock:
         if user_id not in self._locks:
@@ -56,6 +58,42 @@ class SessionManager:
                 logger.error(f"Session error user {user_id}: {e}")
                 return None
 
+    async def get_public(self) -> Client | None:
+        """Sesi bot untuk membaca channel publik tanpa login sebagai user."""
+        async with self._public_lock:
+            if self._public_session is not None:
+                if self._public_session.is_connected:
+                    return self._public_session
+                self._public_session = None
+
+            client = None
+            try:
+                client = Client(
+                    name="public_bot",
+                    api_id=API_ID,
+                    api_hash=API_HASH,
+                    bot_token=BOT_TOKEN,
+                    in_memory=True,
+                )
+                await client.start()
+                self._public_session = client
+                logger.info("Public Telegram session started")
+                return client
+            except Exception as e:
+                logger.error(f"Public session error: {e}")
+                if client is not None:
+                    try:
+                        await client.stop()
+                    except Exception:
+                        pass
+                return None
+
+    async def get_for_chat(self, user_id: int, chat) -> Client | None:
+        """Pilih sesi bot untuk publik, atau sesi user untuk chat private."""
+        if isinstance(chat, str) and chat.startswith("@"):
+            return await self.get_public()
+        return await self.get(user_id)
+
     async def close(self, user_id: int):
         if user_id in self._sessions:
             try:
@@ -67,6 +105,12 @@ class SessionManager:
     async def close_all(self):
         for uid in list(self._sessions.keys()):
             await self.close(uid)
+        if self._public_session is not None:
+            try:
+                await self._public_session.stop()
+            except Exception:
+                pass
+            self._public_session = None
 
 
 session_manager = SessionManager()

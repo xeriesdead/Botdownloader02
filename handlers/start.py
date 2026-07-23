@@ -23,9 +23,10 @@ BOT_COMMANDS = [
 WELCOME_TEXT = (
     "Bot ini membantu kamu mengunduh media dari channel &amp; grup Telegram.\n\n"
     "📌 <b>Cara Pakai:</b>\n"
-    "1. /login — hubungkan akun Telegram kamu\n"
-    "2. <code>/get &lt;link&gt;</code> — download 1 media atau album\n"
-    "3. <code>/get &lt;link_awal&gt; &lt;link_akhir&gt;</code> — download banyak media\n\n"
+    "1. Link channel <b>public</b> bisa langsung di-download tanpa /login\n"
+    "2. /login — hubungkan akun untuk channel/grup private\n"
+    "3. <code>/get &lt;link&gt;</code> — download 1 media atau album\n"
+    "4. <code>/get &lt;link_awal&gt; &lt;link_akhir&gt;</code> — download banyak media\n\n"
     "Mendukung channel &amp; grup <b>public</b> maupun <b>private</b>.\n\n"
     "Ketik /help untuk panduan lengkap."
 )
@@ -84,9 +85,10 @@ def setup(app):
                 "Selamat datang di <b>Media Downloader Bot</b>.\n"
                 "Bot ini membantu kamu mengunduh media dari channel &amp; grup Telegram.\n\n"
                 "📌 <b>Cara Pakai:</b>\n"
-                "1. /login — hubungkan akun Telegram kamu\n"
-                "2. <code>/get &lt;link&gt;</code> — download 1 media atau album\n"
-                "3. <code>/get &lt;link_awal&gt; &lt;link_akhir&gt;</code> — download banyak media\n\n"
+                "1. Link channel <b>public</b> bisa langsung di-download tanpa /login\n"
+                "2. /login — hubungkan akun untuk channel/grup private\n"
+                "3. <code>/get &lt;link&gt;</code> — download 1 media atau album\n"
+                "4. <code>/get &lt;link_awal&gt; &lt;link_akhir&gt;</code> — download banyak media\n\n"
                 "Mendukung channel &amp; grup <b>public</b> maupun <b>private</b>.\n\n"
                 "Ketik /help untuk panduan lengkap.",
                 parse_mode=ParseMode.HTML,
