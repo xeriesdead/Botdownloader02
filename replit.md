@@ -23,6 +23,22 @@ Mode polling membutuhkan secrets berikut di environment: `BOT_TOKEN`, `API_ID`,
 `API_HASH`, `DATABASE_URL`. `WEBHOOK_SECRET` dan `TASKS_SECRET` tidak diperlukan
 untuk mode polling. Lihat `config.py` untuk daftar lengkap env var opsional.
 
+## Download media sosial
+
+Perintah `/get` juga menerima link publik dari YouTube, TikTok, Instagram,
+Facebook, X/Twitter, dan Threads. Video serta foto/carousel didukung tanpa
+meminta login ke akun media sosial:
+
+```text
+/get https://www.youtube.com/watch?v=...
+/get https://www.instagram.com/p/...
+```
+
+Downloader menggunakan `yt-dlp` dan `ffmpeg`. Konten private, konten yang
+memerlukan login, atau link yang sudah kedaluwarsa dapat ditolak oleh platform
+asal. Quota tetap dipotong satu kali per permintaan dan dikembalikan jika
+download gagal atau dibatalkan.
+
 ## User preferences
 
 - Bot ini dideploy ke Railway dalam mode polling always-on karena bot perlu

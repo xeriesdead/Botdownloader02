@@ -5,3 +5,4 @@ telegram
 aiohttp
 aiofiles
 psycopg2-binary
+yt-dlp

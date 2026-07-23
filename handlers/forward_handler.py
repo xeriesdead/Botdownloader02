@@ -1,5 +1,7 @@
 import time
 import asyncio
+import os
+from html import escape
 from telegram.ext import CommandHandler, CallbackQueryHandler
 from telegram.constants import ParseMode
 from telegram.error import BadRequest as TgBadRequest
@@ -8,6 +10,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from modules.queue_manager import queue_manager
 from modules.session_manager import session_manager
 from modules.link_parser import parse_telegram_link, is_public_chat
+from modules.social_downloader import (
+    cleanup_download,
+    download_public_media,
+    is_social_link,
+)
 from modules.quota_service import QuotaService
 from modules.safe_forward import SafeForward, check_channel_access
 from modules.channel_guard import require_member
@@ -67,6 +74,12 @@ def _requires_user_login(chat) -> bool:
     return not is_public_chat(chat)
 
 
+def _social_file_kind(path: str) -> str:
+    return "photo" if os.path.splitext(path)[1].lower() in {
+        ".jpg", ".jpeg", ".png", ".webp", ".gif",
+    } else "video"
+
+
 async def _quota_warn(bot, chat_id: int, uid: int):
     if QuotaService.should_warn(uid):
         await bot.send_message(
@@ -99,6 +112,165 @@ def setup(app):
             "🛑 Pembatalan dikirim. Download akan berhenti setelah pesan saat ini selesai."
         )
 
+    async def social_get_cmd(update, context, url: str):
+        uid = update.effective_user.id
+        chat_id = update.effective_chat.id
+        bot = context.bot
+
+        if not QuotaService.use_quota(uid):
+            return await update.message.reply_text(
+                "❌ <b>Quota habis!</b>\n\n"
+                "• Gunakan /referral untuk bonus quota gratis.\n"
+                "• Atau /pay untuk upgrade ke Premium (quota Unlimited).",
+                parse_mode=ParseMode.HTML,
+            )
+
+        is_prem = QuotaService.is_premium(uid)
+        if not queue_manager.can_add(is_prem):
+            QuotaService.add_quota(uid, 1)
+            return await update.message.reply_text("❌ Server sedang sibuk, coba lagi nanti.")
+
+        pmsg = await update.message.reply_text(
+            "🔍 Mengambil media sosial...\n"
+            "⏳ Link publik saja — tidak perlu login akun sosial."
+        )
+
+        async def edit(text: str):
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=pmsg.message_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                )
+            except TgBadRequest:
+                pass
+
+        async def social_job():
+            work_dir = None
+            quota_refunded = False
+
+            def refund_quota():
+                nonlocal quota_refunded
+                if not quota_refunded:
+                    QuotaService.add_quota(uid, 1)
+                    quota_refunded = True
+
+            try:
+                async with _get_lock(uid):
+                    _bulk_cancel[uid] = False
+                    await edit("🔍 Menganalisis link media sosial...")
+                    title, files, work_dir = await download_public_media(url, uid)
+
+                    if _bulk_cancel.get(uid):
+                        refund_quota()
+                        _bulk_cancel[uid] = False
+                        await edit("🛑 Download dibatalkan.")
+                        return
+
+                    max_size = 50 * 1024 * 1024
+                    oversized = [path for path in files if os.path.getsize(path) > max_size]
+                    if oversized:
+                        refund_quota()
+                        await edit(
+                            "❌ File terlalu besar untuk dikirim langsung oleh bot.\n"
+                            "Coba gunakan video dengan kualitas lebih rendah."
+                        )
+                        return
+
+                    await edit(f"📤 Mengirim <b>{len(files)}</b> media ke chat...")
+                    sent = 0
+                    failed = 0
+                    for path in files:
+                        if _bulk_cancel.get(uid):
+                            refund_quota()
+                            _bulk_cancel[uid] = False
+                            await edit(
+                                f"🛑 Download dibatalkan.\n"
+                                f"✅ Media terkirim: <b>{sent}</b>"
+                            )
+                            return
+
+                        filename = os.path.basename(path)
+                        caption = f"📥 <b>{escape(title)}</b>\n<i>via Social Downloader</i>"
+                        try:
+                            with open(path, "rb") as media:
+                                if _social_file_kind(path) == "photo":
+                                    try:
+                                        await bot.send_photo(
+                                            chat_id=chat_id, photo=media, caption=caption,
+                                            parse_mode=ParseMode.HTML,
+                                        )
+                                    except TgBadRequest:
+                                        media.seek(0)
+                                        await bot.send_document(
+                                            chat_id=chat_id, document=media, filename=filename,
+                                            caption=caption, parse_mode=ParseMode.HTML,
+                                        )
+                                else:
+                                    try:
+                                        await bot.send_video(
+                                            chat_id=chat_id, video=media, caption=caption,
+                                            parse_mode=ParseMode.HTML, supports_streaming=True,
+                                        )
+                                    except TgBadRequest:
+                                        media.seek(0)
+                                        await bot.send_document(
+                                            chat_id=chat_id, document=media, filename=filename,
+                                            caption=caption, parse_mode=ParseMode.HTML,
+                                        )
+                            sent += 1
+                        except Exception as exc:
+                            failed += 1
+                            logger.warning(
+                                "[social] send failed uid=%s file=%s: %s",
+                                uid, filename, exc,
+                            )
+
+                    if not sent:
+                        refund_quota()
+                        await edit("❌ Media berhasil diunduh, tetapi tidak ada yang bisa dikirim.")
+                        return
+
+                    activity_log(uid, "social_download", title[:180])
+                    quota = QuotaService.get_quota(uid)
+                    quota_display = "∞ Unlimited" if quota.get("unlimited") else str(quota["total"])
+                    status = (
+                        f"✅ <b>Selesai!</b>\n"
+                        f"📦 Media terkirim: <b>{sent}</b>"
+                        + (f"\n⚠️ Gagal dikirim: <b>{failed}</b>" if failed else "")
+                        + f"\n📊 Sisa quota: <b>{quota_display}</b>"
+                    )
+                    await edit(status)
+                    await _quota_warn(bot, chat_id, uid)
+            except Exception as exc:
+                logger.error("[social] download uid=%s: %s", uid, exc, exc_info=True)
+                refund_quota()
+                await edit(f"❌ Gagal mendownload media sosial: {exc}")
+            finally:
+                if work_dir:
+                    cleanup_download(work_dir)
+
+        pos = queue_manager.add_job(social_job, is_prem, uid)
+        if pos == 0:
+            QuotaService.add_quota(uid, 1)
+            await edit("❌ Server sedang sibuk, coba lagi nanti.")
+            return
+
+        quota = QuotaService.get_quota(uid)
+        quota_display = "∞ Unlimited" if quota.get("unlimited") else str(quota["total"])
+        if pos > 1:
+            await edit(
+                f"📋 <b>Masuk antrian!</b>\n"
+                f"Posisi kamu: <b>ke-{pos}</b>\n"
+                f"📦 Sisa quota: <b>{quota_display}</b>"
+            )
+        else:
+            await edit(
+                f"⏳ <b>Download dimulai...</b>\n"
+                f"📦 Sisa quota: <b>{quota_display}</b>"
+            )
+
     # ── /get — fungsi tunggal untuk single & bulk ─────────────────────────
     async def get_cmd(update, context):
         uid     = update.effective_user.id
@@ -116,6 +288,9 @@ def setup(app):
         # ── Tidak ada argumen ─────────────────────────────────────────────
         if not args:
             return await update.message.reply_text(_HELP_TEXT, parse_mode=ParseMode.HTML)
+
+        if len(args) == 1 and is_social_link(args[0]):
+            return await social_get_cmd(update, context, args[0])
 
         # ── Satu link → mode single ───────────────────────────────────────
         if len(args) == 1:

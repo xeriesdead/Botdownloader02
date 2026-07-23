@@ -26,7 +26,9 @@ WELCOME_TEXT = (
     "1. Link channel <b>public</b> bisa langsung di-download tanpa /login\n"
     "2. /login — hubungkan akun untuk channel/grup private\n"
     "3. <code>/get &lt;link&gt;</code> — download 1 media atau album\n"
-    "4. <code>/get &lt;link_awal&gt; &lt;link_akhir&gt;</code> — download banyak media\n\n"
+    "4. <code>/get &lt;link_awal&gt; &lt;link_akhir&gt;</code> — download banyak media\n"
+    "5. Link YouTube, TikTok, Instagram, Facebook, X, dan Threads publik\n"
+    "   juga bisa langsung dipakai dengan <code>/get</code>.\n\n"
     "Mendukung channel &amp; grup <b>public</b> maupun <b>private</b>.\n\n"
     "Ketik /help untuk panduan lengkap."
 )
@@ -88,7 +90,9 @@ def setup(app):
                 "1. Link channel <b>public</b> bisa langsung di-download tanpa /login\n"
                 "2. /login — hubungkan akun untuk channel/grup private\n"
                 "3. <code>/get &lt;link&gt;</code> — download 1 media atau album\n"
-                "4. <code>/get &lt;link_awal&gt; &lt;link_akhir&gt;</code> — download banyak media\n\n"
+                "4. <code>/get &lt;link_awal&gt; &lt;link_akhir&gt;</code> — download banyak media\n"
+                "5. Link YouTube, TikTok, Instagram, Facebook, X, dan Threads publik\n"
+                "   juga bisa langsung dipakai dengan <code>/get</code>.\n\n"
                 "Mendukung channel &amp; grup <b>public</b> maupun <b>private</b>.\n\n"
                 "Ketik /help untuk panduan lengkap.",
                 parse_mode=ParseMode.HTML,
