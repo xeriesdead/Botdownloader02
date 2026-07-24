@@ -3,6 +3,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import urllib.request
+import json as _json
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -25,6 +27,7 @@ SOCIAL_DOMAINS = {
 }
 
 _TWITTER_DOMAINS = {"twitter.com", "x.com", "t.co"}
+_TIKTOK_DOMAINS  = {"tiktok.com", "vt.tiktok.com"}
 
 _TEMP_ROOT = "downloads"
 _IGNORED_SUFFIXES = {".part", ".ytdl", ".json", ".description", ".jpg.part"}
@@ -160,6 +163,89 @@ def _gallery_dl_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     return title, sorted(files)
 
 
+def _is_tiktok_link(url: str) -> bool:
+    try:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return any(
+        hostname == d or hostname.endswith(f".{d}") for d in _TIKTOK_DOMAINS
+    )
+
+
+def _tikwm_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+    """
+    Download TikTok video/photo via tikwm.com public API (no auth required).
+    Handles geo-blocking that prevents yt-dlp from accessing TikTok pages.
+    Returns (title, list_of_file_paths).
+    """
+    _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    api_url = f"https://www.tikwm.com/api/?url={url}&hd=1"
+    logger.info("[social] tikwm API request: %s", api_url)
+
+    req = urllib.request.Request(api_url, headers={"User-Agent": _UA})
+    try:
+        resp = urllib.request.urlopen(req, timeout=20)
+        data = _json.loads(resp.read())
+    except Exception as exc:
+        raise ValueError(
+            "❌ Gagal menghubungi layanan download TikTok. Coba lagi nanti."
+        ) from exc
+
+    if data.get("code") != 0:
+        msg = data.get("msg") or "unknown error"
+        raise ValueError(
+            f"❌ Gagal mengambil info video TikTok: {msg}\n"
+            "Pastikan link masih aktif dan bersifat publik."
+        )
+
+    v      = data.get("data") or {}
+    title  = (v.get("title") or "TikTok video").strip()[:160] or "TikTok video"
+    images = v.get("images")  # list of image URLs for photo carousel
+
+    def _dl(dl_url: str, dest: str) -> str:
+        req2 = urllib.request.Request(dl_url, headers={"User-Agent": _UA, "Referer": "https://www.tikwm.com/"})
+        with urllib.request.urlopen(req2, timeout=120) as r:
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = r.read(512 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        return dest
+
+    files: list[str] = []
+
+    if images:
+        # Photo carousel: download each image
+        for i, img_url in enumerate(images, 1):
+            ext  = img_url.split("?")[0].rsplit(".", 1)[-1] if "." in img_url.split("?")[0] else "jpg"
+            dest = os.path.join(work_dir, f"{i:03d}_photo.{ext}")
+            try:
+                _dl(img_url, dest)
+                files.append(dest)
+                logger.info("[social] tikwm photo %d/%d downloaded: %d bytes", i, len(images), os.path.getsize(dest))
+            except Exception as exc:
+                logger.warning("[social] tikwm photo %d failed: %s", i, exc)
+    else:
+        # Video: prefer no-watermark URL, fall back to watermarked
+        play_url = v.get("play") or v.get("wmplay")
+        if not play_url:
+            raise ValueError("❌ Tidak ada URL video yang tersedia dari API.")
+        dest = os.path.join(work_dir, "001_video.mp4")
+        _dl(play_url, dest)
+        files.append(dest)
+        logger.info("[social] tikwm video downloaded: %d bytes", os.path.getsize(dest))
+
+    if not files:
+        raise ValueError(
+            "❌ Tidak ada media yang berhasil didownload dari TikTok.\n"
+            "Pastikan link masih aktif dan bersifat publik."
+        )
+
+    return title, sorted(files)
+
+
 def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """Run yt-dlp outside the event loop and return title plus downloaded paths."""
     before = {
@@ -188,6 +274,11 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         "fragment_retries": 2,
         "concurrent_fragment_downloads": 2,
     }
+
+    # ── TikTok: gunakan tikwm API (bypass geo-block) ─────────────────────
+    if _is_tiktok_link(url):
+        logger.info("[social] TikTok detected, using tikwm API: %s", url)
+        return _tikwm_download_sync(url, work_dir)
 
     ytdlp_error_msg: str | None = None
     try:
