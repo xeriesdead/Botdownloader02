@@ -36,7 +36,6 @@ import handlers.help_handler
 import handlers.admin_handler
 import handlers.info_handler
 import handlers.queue_handler
-import handlers.terabox_handler
 
 
 def _require_env(key: str) -> str:
@@ -73,7 +72,6 @@ def build_telegram_application() -> Application:
     handlers.admin_handler.setup(application)
     handlers.info_handler.setup(application)
     handlers.queue_handler.setup(application)
-    handlers.terabox_handler.setup(application)
 
     return application
 
