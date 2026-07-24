@@ -104,7 +104,7 @@ def _is_instagram_carousel(url: str) -> bool:
     )
 
 
-def _classify_ytdlp_error(message: str) -> str:
+def _classify_ytdlp_error(message: str, url: str = "") -> str:
     """Return a user-friendly Indonesian message based on the yt-dlp error text."""
     lower = message.lower()
     if any(p in lower for p in _NO_MEDIA_PHRASES):
@@ -117,6 +117,20 @@ def _classify_ytdlp_error(message: str) -> str:
             "yang bisa didownload.</i>"
         )
     if any(p in lower for p in _AUTH_PHRASES):
+        # Facebook/Threads: berikan pesan khusus jika cookies belum dikonfigurasi
+        if url and _is_meta_link(url) and not _get_meta_cookies():
+            return (
+                "❌ <b>Facebook/Threads memerlukan cookies login.</b>\n\n"
+                "Fitur ini belum dikonfigurasi oleh admin.\n"
+                "Hubungi admin untuk mengaktifkan download Facebook & Threads."
+            )
+        if url and _is_meta_link(url):
+            return (
+                "❌ Gagal mendownload dari Facebook/Threads.\n\n"
+                "Kemungkinan penyebab:\n"
+                "• Cookies sudah kedaluwarsa — admin perlu update via /setmetacookies\n"
+                "• Konten bersifat privat atau hanya untuk teman"
+            )
         return (
             "❌ Konten ini bersifat privat atau memerlukan login.\n"
             "Bot hanya mendukung konten yang benar-benar publik."
@@ -329,7 +343,7 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
             logger.info("[social] trying gallery-dl fallback for X/Twitter: %s", url)
             return _gallery_dl_sync(url, work_dir)
 
-        raise ValueError(_classify_ytdlp_error(ytdlp_error_msg)) from exc
+        raise ValueError(_classify_ytdlp_error(ytdlp_error_msg, url=url)) from exc
     finally:
         if cookie_file and os.path.exists(cookie_file):
             try:
