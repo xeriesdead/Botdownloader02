@@ -1,7 +1,7 @@
 import asyncio
 from datetime import date
 
-from telegram.ext import CommandHandler, MessageHandler, filters
+from telegram.ext import CommandHandler
 from telegram.constants import ParseMode
 
 from config import ADMIN_IDS
@@ -543,74 +543,6 @@ def setup(app):
 
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
-    # ── /setmetacookies — simpan cookies Facebook/Threads (admin only) ────
-    @admin_only
-    async def set_meta_cookies(update, context):
-        msg = update.message
-
-        # /setmetacookies hapus → hapus cookies
-        if context.args and context.args[0].lower() == "hapus":
-            db.config_delete("meta_cookies")
-            return await msg.reply_text("🗑 Cookies Meta (Facebook/Threads) berhasil dihapus.")
-
-        # /setmetacookies (tanpa argumen, tanpa dokumen) → tampilkan status
-        if not context.args and not msg.document:
-            has_cookies = bool(db.config_get("meta_cookies"))
-            status = "✅ <b>Sudah dikonfigurasi</b>" if has_cookies else "❌ <b>Belum dikonfigurasi</b>"
-            return await msg.reply_text(
-                f"🍪 <b>Cookies Meta (Facebook/Threads)</b>\n"
-                f"Status: {status}\n\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "📋 <b>Cara setup:</b>\n\n"
-                "1️⃣ Install ekstensi <b>Get cookies.txt LOCALLY</b> di Chrome/Firefox\n"
-                "2️⃣ Login ke <a href=\"https://www.facebook.com\">facebook.com</a>\n"
-                "3️⃣ Klik ekstensi → Export cookies → format <b>Netscape</b>\n"
-                "4️⃣ Kirim file <code>cookies.txt</code> tersebut ke bot ini\n"
-                "   dengan caption: <code>/setmetacookies</code>\n\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "🗑 Untuk hapus: <code>/setmetacookies hapus</code>\n\n"
-                "<i>Cookie yang sama juga berlaku untuk Threads karena satu akun Meta.</i>",
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-
-        # /setmetacookies dikirim sebagai caption file dokumen
-        if msg.document:
-            if msg.document.file_size > 500 * 1024:  # maks 500 KB
-                return await msg.reply_text("❌ File terlalu besar. Maksimal 500 KB.")
-            status_msg = await msg.reply_text("⏳ Membaca file cookies...")
-            try:
-                file = await context.bot.get_file(msg.document.file_id)
-                content = bytes()
-                import io
-                buf = io.BytesIO()
-                await file.download_to_memory(buf)
-                content = buf.getvalue().decode("utf-8", errors="replace")
-            except Exception as e:
-                return await status_msg.edit_text(f"❌ Gagal membaca file: {e}")
-
-            if "# Netscape HTTP Cookie File" not in content and "# HTTP Cookie File" not in content:
-                return await status_msg.edit_text(
-                    "❌ Format file tidak valid.\n"
-                    "Pastikan file cookies dalam format <b>Netscape</b> "
-                    "(baris pertama harus <code># Netscape HTTP Cookie File</code>).",
-                    parse_mode="HTML",
-                )
-
-            db.config_set("meta_cookies", content)
-            return await status_msg.edit_text(
-                "✅ <b>Cookies Meta berhasil disimpan!</b>\n\n"
-                "User sekarang bisa download video Facebook dan Threads "
-                "dengan perintah <code>/get &lt;link&gt;</code>.",
-                parse_mode="HTML",
-            )
-
-        return await msg.reply_text(
-            "❌ Kirim file cookies.txt dengan caption <code>/setmetacookies</code>, "
-            "atau ketik <code>/setmetacookies hapus</code> untuk menghapus.",
-            parse_mode="HTML",
-        )
-
     app.add_handler(CommandHandler("activity",        activity))
     app.add_handler(CommandHandler("recentactivity",  recent_activity))
     app.add_handler(CommandHandler("topdownloaders",  top_downloaders))
@@ -625,7 +557,7 @@ def setup(app):
     app.add_handler(CommandHandler("ban",           ban_user))
     app.add_handler(CommandHandler("unban",         unban_user))
     app.add_handler(CommandHandler("broadcast",     broadcast))
-    app.add_handler(CommandHandler("setmetacookies", set_meta_cookies))
+
     # Tangkap dokumen yang captionnya /setmetacookies (CommandHandler tidak menangkap dokumen)
     app.add_handler(MessageHandler(
         filters.Document.ALL & filters.CaptionRegex(r"^/setmetacookies"),

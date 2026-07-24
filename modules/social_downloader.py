@@ -28,8 +28,10 @@ SOCIAL_DOMAINS = {
     "threads.com",
 }
 
-# Domain yang memerlukan cookies Meta (Facebook/Threads)
-_META_DOMAINS = {"facebook.com", "fb.watch", "fb.com", "threads.net", "threads.com"}
+# Domain Facebook/Threads yang akan dihandle via cobalt API
+_META_DOMAINS  = {"facebook.com", "fb.watch", "fb.com", "threads.net", "threads.com"}
+_COBALT_API    = "https://api.cobalt.tools/"
+_COBALT_UA     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 _TWITTER_DOMAINS = {"twitter.com", "x.com", "t.co"}
 _TIKTOK_DOMAINS  = {"tiktok.com", "vt.tiktok.com"}
@@ -70,18 +72,12 @@ def is_social_link(url: str) -> bool:
 
 
 def _is_meta_link(url: str) -> bool:
-    """True untuk link Facebook dan Threads yang memerlukan cookies Meta."""
+    """True untuk link Facebook dan Threads."""
     try:
         hostname = (urlparse(url).hostname or "").lower().rstrip(".")
     except ValueError:
         return False
     return any(hostname == d or hostname.endswith(f".{d}") for d in _META_DOMAINS)
-
-
-def _get_meta_cookies() -> str | None:
-    """Ambil cookie Meta (Facebook/Threads) dari database."""
-    from database.db import db
-    return db.config_get("meta_cookies")
 
 
 def _is_twitter_link(url: str) -> bool:
@@ -104,7 +100,7 @@ def _is_instagram_carousel(url: str) -> bool:
     )
 
 
-def _classify_ytdlp_error(message: str, url: str = "") -> str:
+def _classify_ytdlp_error(message: str) -> str:
     """Return a user-friendly Indonesian message based on the yt-dlp error text."""
     lower = message.lower()
     if any(p in lower for p in _NO_MEDIA_PHRASES):
@@ -117,20 +113,6 @@ def _classify_ytdlp_error(message: str, url: str = "") -> str:
             "yang bisa didownload.</i>"
         )
     if any(p in lower for p in _AUTH_PHRASES):
-        # Facebook/Threads: berikan pesan khusus jika cookies belum dikonfigurasi
-        if url and _is_meta_link(url) and not _get_meta_cookies():
-            return (
-                "❌ <b>Facebook/Threads memerlukan cookies login.</b>\n\n"
-                "Fitur ini belum dikonfigurasi oleh admin.\n"
-                "Hubungi admin untuk mengaktifkan download Facebook & Threads."
-            )
-        if url and _is_meta_link(url):
-            return (
-                "❌ Gagal mendownload dari Facebook/Threads.\n\n"
-                "Kemungkinan penyebab:\n"
-                "• Cookies sudah kedaluwarsa — admin perlu update via /setmetacookies\n"
-                "• Konten bersifat privat atau hanya untuk teman"
-            )
         return (
             "❌ Konten ini bersifat privat atau memerlukan login.\n"
             "Bot hanya mendukung konten yang benar-benar publik."
@@ -139,6 +121,95 @@ def _classify_ytdlp_error(message: str, url: str = "") -> str:
         "❌ Gagal mendownload. Pastikan link masih aktif dan bersifat publik.\n\n"
         f"<i>Detail: {message[:200]}</i>"
     )
+
+
+def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+    """
+    Download via cobalt.tools API — tanpa auth, mendukung Facebook & Threads.
+    Returns (title, list_of_file_paths).
+    """
+    body = _json.dumps({"url": url}).encode()
+    req  = urllib.request.Request(
+        _COBALT_API,
+        data=body,
+        headers={
+            "Accept":       "application/json",
+            "Content-Type": "application/json",
+            "User-Agent":   _COBALT_UA,
+        },
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=30)
+        data = _json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        raise ValueError(
+            f"❌ Layanan download tidak tersedia saat ini (HTTP {exc.code}). Coba lagi nanti."
+        ) from exc
+    except Exception as exc:
+        raise ValueError(
+            "❌ Gagal menghubungi layanan download. Coba lagi nanti."
+        ) from exc
+
+    status = data.get("status")
+    logger.info("[social] cobalt status=%s url=%s", status, url)
+
+    if status == "error":
+        code = (data.get("error") or {}).get("code", "unknown")
+        raise ValueError(
+            "❌ Gagal mendownload.\n"
+            "Pastikan link masih aktif dan bersifat publik.\n"
+            f"<i>Kode: {code}</i>"
+        )
+
+    def _dl(dl_url: str, dest: str) -> None:
+        req2 = urllib.request.Request(dl_url, headers={"User-Agent": _COBALT_UA})
+        with urllib.request.urlopen(req2, timeout=120) as r:
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = r.read(512 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+
+    files: list[str] = []
+
+    if status in ("tunnel", "redirect"):
+        dl_url = data.get("url")
+        if not dl_url:
+            raise ValueError("❌ Tidak ada link download yang tersedia.")
+        # Tentukan ekstensi dari Content-Type atau fallback mp4
+        dest = os.path.join(work_dir, "001_video.mp4")
+        _dl(dl_url, dest)
+        files.append(dest)
+        logger.info("[social] cobalt single downloaded: %d bytes", os.path.getsize(dest))
+
+    elif status == "picker":
+        items = data.get("picker") or []
+        for i, item in enumerate(items, 1):
+            item_url  = item.get("url")
+            item_type = item.get("type", "video")
+            if not item_url:
+                continue
+            ext  = "jpg" if item_type == "photo" else "mp4"
+            dest = os.path.join(work_dir, f"{i:03d}_{item_type}.{ext}")
+            try:
+                _dl(item_url, dest)
+                files.append(dest)
+                logger.info(
+                    "[social] cobalt picker %d downloaded: %d bytes",
+                    i, os.path.getsize(dest),
+                )
+            except Exception as exc:
+                logger.warning("[social] cobalt picker item %d failed: %s", i, exc)
+
+    if not files:
+        raise ValueError(
+            "❌ Tidak ada media yang berhasil didownload.\n"
+            "Pastikan link masih aktif dan bersifat publik."
+        )
+
+    return "Facebook/Threads", sorted(files)
 
 
 def _gallery_dl_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
@@ -314,21 +385,10 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         logger.info("[social] TikTok detected, using tikwm API: %s", url)
         return _tikwm_download_sync(url, work_dir)
 
-    # ── Facebook/Threads: gunakan cookies Meta jika tersedia ─────────────
-    cookie_file: str | None = None
+    # ── Facebook/Threads: gunakan cobalt.tools API (tanpa auth) ──────────
     if _is_meta_link(url):
-        meta_cookies = _get_meta_cookies()
-        if meta_cookies:
-            tmp = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False, encoding="utf-8"
-            )
-            tmp.write(meta_cookies)
-            tmp.close()
-            cookie_file = tmp.name
-            options["cookiefile"] = cookie_file
-            logger.info("[social] Meta cookies applied for: %s", url)
-        else:
-            logger.info("[social] No Meta cookies configured for: %s", url)
+        logger.info("[social] Meta link detected, using cobalt API: %s", url)
+        return _cobalt_download_sync(url, work_dir)
 
     ytdlp_error_msg: str | None = None
     try:
@@ -343,13 +403,7 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
             logger.info("[social] trying gallery-dl fallback for X/Twitter: %s", url)
             return _gallery_dl_sync(url, work_dir)
 
-        raise ValueError(_classify_ytdlp_error(ytdlp_error_msg, url=url)) from exc
-    finally:
-        if cookie_file and os.path.exists(cookie_file):
-            try:
-                os.unlink(cookie_file)
-            except Exception:
-                pass
+        raise ValueError(_classify_ytdlp_error(ytdlp_error_msg)) from exc
 
     title = (info or {}).get("title") or "Media sosial"
     downloaded = []
