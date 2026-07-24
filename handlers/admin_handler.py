@@ -557,9 +557,3 @@ def setup(app):
     app.add_handler(CommandHandler("ban",           ban_user))
     app.add_handler(CommandHandler("unban",         unban_user))
     app.add_handler(CommandHandler("broadcast",     broadcast))
-
-    # Tangkap dokumen yang captionnya /setmetacookies (CommandHandler tidak menangkap dokumen)
-    app.add_handler(MessageHandler(
-        filters.Document.ALL & filters.CaptionRegex(r"^/setmetacookies"),
-        set_meta_cookies,
-    ))
