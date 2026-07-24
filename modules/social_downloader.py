@@ -28,10 +28,17 @@ SOCIAL_DOMAINS = {
     "threads.com",
 }
 
-# Domain Facebook/Threads yang akan dihandle via cobalt API
-_META_DOMAINS  = {"facebook.com", "fb.watch", "fb.com", "threads.net", "threads.com"}
-_COBALT_API    = "https://api.cobalt.tools/"
-_COBALT_UA     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+# Facebook: scraping langsung dari halaman HTML
+_FACEBOOK_DOMAINS = {"facebook.com", "fb.watch", "fb.com"}
+# Threads: pakai cobalt API
+_THREADS_DOMAINS  = {"threads.net", "threads.com"}
+_COBALT_API       = "https://api.cobalt.tools/"
+_COBALT_UA        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+_FB_UA            = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 _TWITTER_DOMAINS = {"twitter.com", "x.com", "t.co"}
 _TIKTOK_DOMAINS  = {"tiktok.com", "vt.tiktok.com"}
@@ -71,13 +78,20 @@ def is_social_link(url: str) -> bool:
     )
 
 
-def _is_meta_link(url: str) -> bool:
-    """True untuk link Facebook dan Threads."""
+def _is_facebook_link(url: str) -> bool:
     try:
         hostname = (urlparse(url).hostname or "").lower().rstrip(".")
     except ValueError:
         return False
-    return any(hostname == d or hostname.endswith(f".{d}") for d in _META_DOMAINS)
+    return any(hostname == d or hostname.endswith(f".{d}") for d in _FACEBOOK_DOMAINS)
+
+
+def _is_threads_link(url: str) -> bool:
+    try:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return any(hostname == d or hostname.endswith(f".{d}") for d in _THREADS_DOMAINS)
 
 
 def _is_twitter_link(url: str) -> bool:
@@ -123,9 +137,95 @@ def _classify_ytdlp_error(message: str) -> str:
     )
 
 
+def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+    """
+    Download video Facebook dengan scraping halaman HTML langsung.
+    Mendukung semua format URL Facebook termasuk /share/, /watch/, /reel/, dll.
+    """
+    import re
+    import http.cookiejar
+
+    jar    = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    opener.addheaders = [
+        ("User-Agent",      _FB_UA),
+        ("Accept",          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        ("Accept-Language", "en-US,en;q=0.9"),
+    ]
+
+    try:
+        resp = opener.open(url, timeout=30)
+        html = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        raise ValueError(f"❌ Gagal mengakses halaman Facebook: {exc}") from exc
+
+    # Cari URL video dari JSON yang di-embed Facebook di dalam HTML
+    video_url: str | None = None
+    for pattern in [
+        r'"playable_url_quality_hd":"((?:[^"\\]|\\.)*)"',
+        r'"playable_url":"((?:[^"\\]|\\.)*)"',
+        r'"browser_native_hd_url":"((?:[^"\\]|\\.)*)"',
+        r'"browser_native_sd_url":"((?:[^"\\]|\\.)*)"',
+        r'"hd_src":"((?:[^"\\]|\\.)*)"',
+        r'"sd_src":"((?:[^"\\]|\\.)*)"',
+    ]:
+        m = re.search(pattern, html)
+        if m:
+            raw = m.group(1)
+            # Unescape JSON string escapes
+            video_url = (
+                raw.replace("\\u0026", "&")
+                   .replace("\\/", "/")
+                   .replace("\\\\", "\\")
+            )
+            break
+
+    # Coba juga dari og:video meta tag
+    if not video_url:
+        m = re.search(r'<meta property="og:video(?::url)?" content="([^"]+)"', html)
+        if m:
+            video_url = m.group(1)
+
+    if not video_url:
+        raise ValueError(
+            "❌ Gagal mendapatkan URL video dari Facebook.\n"
+            "Pastikan video bersifat <b>publik</b> dan link masih aktif.\n\n"
+            "<i>Video yang hanya untuk teman atau privat tidak bisa didownload.</i>"
+        )
+
+    logger.info("[social] Facebook video URL: %s...", video_url[:80])
+
+    # Ambil judul dari og:title
+    title = "Facebook video"
+    tm = re.search(r'<meta property="og:title" content="([^"]*)"', html)
+    if tm:
+        title = tm.group(1) or title
+
+    dest = os.path.join(work_dir, "001_video.mp4")
+    req2 = urllib.request.Request(
+        video_url,
+        headers={
+            "User-Agent": _FB_UA,
+            "Referer":    "https://www.facebook.com/",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req2, timeout=300) as r:
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = r.read(512 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+    except Exception as exc:
+        raise ValueError(f"❌ Gagal mengunduh video Facebook: {exc}") from exc
+
+    return title, [dest]
+
+
 def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
-    Download via cobalt.tools API — tanpa auth, mendukung Facebook & Threads.
+    Download via cobalt.tools API — tanpa auth, mendukung Threads.
     Returns (title, list_of_file_paths).
     """
     body = _json.dumps({"url": url}).encode()
@@ -385,9 +485,14 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         logger.info("[social] TikTok detected, using tikwm API: %s", url)
         return _tikwm_download_sync(url, work_dir)
 
-    # ── Facebook/Threads: gunakan cobalt.tools API (tanpa auth) ──────────
-    if _is_meta_link(url):
-        logger.info("[social] Meta link detected, using cobalt API: %s", url)
+    # ── Facebook: scraping langsung dari halaman HTML ─────────────────────
+    if _is_facebook_link(url):
+        logger.info("[social] Facebook detected, using HTML scrape: %s", url)
+        return _facebook_download_sync(url, work_dir)
+
+    # ── Threads: cobalt API ───────────────────────────────────────────────
+    if _is_threads_link(url):
+        logger.info("[social] Threads detected, using cobalt API: %s", url)
         return _cobalt_download_sync(url, work_dir)
 
     ytdlp_error_msg: str | None = None
