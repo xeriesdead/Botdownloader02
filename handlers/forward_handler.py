@@ -4,7 +4,7 @@ import os
 from html import escape
 from telegram.ext import CommandHandler, CallbackQueryHandler
 from telegram.constants import ParseMode
-from telegram.error import BadRequest as TgBadRequest
+from telegram.error import BadRequest as TgBadRequest, TimedOut, NetworkError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from modules.queue_manager import queue_manager
@@ -178,10 +178,17 @@ def setup(app):
                         )
                         return
 
-                    await edit(f"📤 Mengirim <b>{len(files)}</b> media ke chat...")
+                    total_files = len(files)
+                    await edit(f"📤 Mengirim <b>{total_files}</b> media ke chat...")
                     sent = 0
                     failed = 0
-                    for path in files:
+                    # Timeout eksplisit untuk upload file ke Telegram.
+                    # Default python-telegram-bot terlalu pendek untuk video.
+                    _SEND_WRITE_TIMEOUT = 300   # 5 menit untuk upload
+                    _SEND_READ_TIMEOUT  = 120   # 2 menit untuk respons
+                    _TRANSIENT_ERRORS   = (TgBadRequest, TimedOut, NetworkError)
+
+                    for idx, path in enumerate(files, 1):
                         if _bulk_cancel.get(uid):
                             refund_quota()
                             _bulk_cancel[uid] = False
@@ -191,6 +198,9 @@ def setup(app):
                             )
                             return
 
+                        await edit(
+                            f"📤 Mengirim media <b>{idx}/{total_files}</b>..."
+                        )
                         filename = os.path.basename(path)
                         caption = f"📥 <b>{escape(title)}</b>\n<i>via Social Downloader</i>"
                         try:
@@ -198,26 +208,38 @@ def setup(app):
                                 if _social_file_kind(path) == "photo":
                                     try:
                                         await bot.send_photo(
-                                            chat_id=chat_id, photo=media, caption=caption,
-                                            parse_mode=ParseMode.HTML,
+                                            chat_id=chat_id, photo=media,
+                                            caption=caption, parse_mode=ParseMode.HTML,
+                                            write_timeout=_SEND_WRITE_TIMEOUT,
+                                            read_timeout=_SEND_READ_TIMEOUT,
                                         )
-                                    except TgBadRequest:
+                                    except _TRANSIENT_ERRORS:
                                         media.seek(0)
                                         await bot.send_document(
-                                            chat_id=chat_id, document=media, filename=filename,
-                                            caption=caption, parse_mode=ParseMode.HTML,
+                                            chat_id=chat_id, document=media,
+                                            filename=filename, caption=caption,
+                                            parse_mode=ParseMode.HTML,
+                                            write_timeout=_SEND_WRITE_TIMEOUT,
+                                            read_timeout=_SEND_READ_TIMEOUT,
                                         )
                                 else:
                                     try:
                                         await bot.send_video(
-                                            chat_id=chat_id, video=media, caption=caption,
-                                            parse_mode=ParseMode.HTML, supports_streaming=True,
+                                            chat_id=chat_id, video=media,
+                                            caption=caption, parse_mode=ParseMode.HTML,
+                                            supports_streaming=True,
+                                            write_timeout=_SEND_WRITE_TIMEOUT,
+                                            read_timeout=_SEND_READ_TIMEOUT,
                                         )
-                                    except TgBadRequest:
+                                    except _TRANSIENT_ERRORS:
+                                        # send_video gagal (format/timeout) → coba dokumen
                                         media.seek(0)
                                         await bot.send_document(
-                                            chat_id=chat_id, document=media, filename=filename,
-                                            caption=caption, parse_mode=ParseMode.HTML,
+                                            chat_id=chat_id, document=media,
+                                            filename=filename, caption=caption,
+                                            parse_mode=ParseMode.HTML,
+                                            write_timeout=_SEND_WRITE_TIMEOUT,
+                                            read_timeout=_SEND_READ_TIMEOUT,
                                         )
                             sent += 1
                         except Exception as exc:
@@ -226,10 +248,18 @@ def setup(app):
                                 "[social] send failed uid=%s file=%s: %s",
                                 uid, filename, exc,
                             )
+                            # Update pesan agar tidak tampak stuck
+                            await edit(
+                                f"⚠️ Gagal mengirim item {idx}/{total_files}, melanjutkan..."
+                            )
 
                     if not sent:
                         refund_quota()
-                        await edit("❌ Media berhasil diunduh, tetapi tidak ada yang bisa dikirim.")
+                        await edit(
+                            "❌ Semua media gagal dikirim ke chat.\n\n"
+                            "Kemungkinan penyebab: format video tidak didukung Telegram "
+                            "atau file terlalu besar. Quota dikembalikan."
+                        )
                         return
 
                     activity_log(uid, "social_download", title[:180])
