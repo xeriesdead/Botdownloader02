@@ -18,13 +18,18 @@ SOCIAL_DOMAINS = {
     "youtu.be",
     "facebook.com",
     "fb.watch",
+    "fb.com",
     "instagram.com",
     "tiktok.com",
     "twitter.com",
     "x.com",
     "t.co",
     "threads.net",
+    "threads.com",
 }
+
+# Domain yang memerlukan cookies Meta (Facebook/Threads)
+_META_DOMAINS = {"facebook.com", "fb.watch", "fb.com", "threads.net", "threads.com"}
 
 _TWITTER_DOMAINS = {"twitter.com", "x.com", "t.co"}
 _TIKTOK_DOMAINS  = {"tiktok.com", "vt.tiktok.com"}
@@ -62,6 +67,21 @@ def is_social_link(url: str) -> bool:
         hostname == domain or hostname.endswith(f".{domain}")
         for domain in SOCIAL_DOMAINS
     )
+
+
+def _is_meta_link(url: str) -> bool:
+    """True untuk link Facebook dan Threads yang memerlukan cookies Meta."""
+    try:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return any(hostname == d or hostname.endswith(f".{d}") for d in _META_DOMAINS)
+
+
+def _get_meta_cookies() -> str | None:
+    """Ambil cookie Meta (Facebook/Threads) dari database."""
+    from database.db import db
+    return db.config_get("meta_cookies")
 
 
 def _is_twitter_link(url: str) -> bool:
@@ -280,6 +300,22 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         logger.info("[social] TikTok detected, using tikwm API: %s", url)
         return _tikwm_download_sync(url, work_dir)
 
+    # ── Facebook/Threads: gunakan cookies Meta jika tersedia ─────────────
+    cookie_file: str | None = None
+    if _is_meta_link(url):
+        meta_cookies = _get_meta_cookies()
+        if meta_cookies:
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, encoding="utf-8"
+            )
+            tmp.write(meta_cookies)
+            tmp.close()
+            cookie_file = tmp.name
+            options["cookiefile"] = cookie_file
+            logger.info("[social] Meta cookies applied for: %s", url)
+        else:
+            logger.info("[social] No Meta cookies configured for: %s", url)
+
     ytdlp_error_msg: str | None = None
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
@@ -294,6 +330,12 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
             return _gallery_dl_sync(url, work_dir)
 
         raise ValueError(_classify_ytdlp_error(ytdlp_error_msg)) from exc
+    finally:
+        if cookie_file and os.path.exists(cookie_file):
+            try:
+                os.unlink(cookie_file)
+            except Exception:
+                pass
 
     title = (info or {}).get("title") or "Media sosial"
     downloaded = []
