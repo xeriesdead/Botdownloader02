@@ -141,6 +141,10 @@ def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
     Download video Facebook dengan scraping halaman HTML langsung.
     Mendukung semua format URL Facebook termasuk /share/, /watch/, /reel/, dll.
+    Strategi:
+      1. Kunjungi homepage Facebook dulu untuk dapat cookies sesi (datr, sb).
+      2. Akses URL asli; jika gagal, coba versi mbasic.facebook.com.
+      3. Ekstrak URL video dari JSON/meta yang di-embed dalam HTML.
     """
     import re
     import http.cookiejar
@@ -148,66 +152,103 @@ def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     jar    = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
     opener.addheaders = [
-        ("User-Agent",      _FB_UA),
-        ("Accept",          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
-        ("Accept-Language", "en-US,en;q=0.9"),
+        ("User-Agent",               _FB_UA),
+        ("Accept",                   "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        ("Accept-Language",          "en-US,en;q=0.9"),
+        ("Connection",               "keep-alive"),
+        ("Upgrade-Insecure-Requests","1"),
+        ("Sec-Fetch-Dest",           "document"),
+        ("Sec-Fetch-Mode",           "navigate"),
+        ("Sec-Fetch-Site",           "none"),
     ]
 
-    try:
-        resp = opener.open(url, timeout=30)
-        html = resp.read().decode("utf-8", errors="replace")
-    except Exception as exc:
-        raise ValueError(f"❌ Gagal mengakses halaman Facebook: {exc}") from exc
+    # Step 1: Kunjungi homepage Facebook untuk mendapatkan cookies sesi
+    for init_url in ("https://www.facebook.com/", "https://mbasic.facebook.com/"):
+        try:
+            opener.open(init_url, timeout=10)
+            break
+        except Exception:
+            continue
 
-    # Cari URL video dari JSON yang di-embed Facebook di dalam HTML
+    # Step 2: Coba URL asli, fallback ke mbasic.facebook.com
+    def _to_mbasic(u: str) -> str:
+        return (
+            u.replace("www.facebook.com",  "mbasic.facebook.com")
+             .replace("m.facebook.com",    "mbasic.facebook.com")
+             .replace("fb.watch",          "mbasic.facebook.com")
+        )
+
+    html: str | None = None
+    for try_url in (url, _to_mbasic(url)):
+        try:
+            resp = opener.open(try_url, timeout=30)
+            html = resp.read().decode("utf-8", errors="replace")
+            logger.info("[social] Facebook page fetched from: %s", try_url)
+            break
+        except Exception as exc:
+            logger.warning("[social] Facebook fetch failed (%s): %s", try_url, exc)
+
+    if not html:
+        raise ValueError(
+            "❌ Gagal mengakses halaman Facebook.\n"
+            "Pastikan link masih aktif dan bersifat publik."
+        )
+
+    # Step 3: Cari URL video dari berbagai pola HTML/JSON Facebook
     video_url: str | None = None
-    for pattern in [
+
+    # Pola JSON yang di-embed dalam halaman (www.facebook.com)
+    json_patterns = [
         r'"playable_url_quality_hd":"((?:[^"\\]|\\.)*)"',
         r'"playable_url":"((?:[^"\\]|\\.)*)"',
         r'"browser_native_hd_url":"((?:[^"\\]|\\.)*)"',
         r'"browser_native_sd_url":"((?:[^"\\]|\\.)*)"',
         r'"hd_src":"((?:[^"\\]|\\.)*)"',
         r'"sd_src":"((?:[^"\\]|\\.)*)"',
-    ]:
-        m = re.search(pattern, html)
+    ]
+    for pat in json_patterns:
+        m = re.search(pat, html)
         if m:
             raw = m.group(1)
-            # Unescape JSON string escapes
             video_url = (
                 raw.replace("\\u0026", "&")
-                   .replace("\\/", "/")
-                   .replace("\\\\", "\\")
+                   .replace("\\/",     "/")
+                   .replace("\\\\",    "\\")
             )
             break
 
-    # Coba juga dari og:video meta tag
+    # Pola HTML (mbasic.facebook.com): tag <video> atau link fbcdn
     if not video_url:
-        m = re.search(r'<meta property="og:video(?::url)?" content="([^"]+)"', html)
-        if m:
-            video_url = m.group(1)
+        for pat in (
+            r'<video[^>]+src="(https://[^"]+\.fbcdn\.net[^"]*)"',
+            r'href="(https://video\.[^"]+\.fbcdn\.net[^"]*)"',
+            r'<meta property="og:video(?::url)?" content="([^"]+)"',
+        ):
+            m = re.search(pat, html)
+            if m:
+                video_url = m.group(1)
+                break
 
     if not video_url:
         raise ValueError(
             "❌ Gagal mendapatkan URL video dari Facebook.\n"
             "Pastikan video bersifat <b>publik</b> dan link masih aktif.\n\n"
-            "<i>Video yang hanya untuk teman atau privat tidak bisa didownload.</i>"
+            "<i>Video privat atau yang hanya untuk teman tidak bisa didownload.</i>"
         )
 
-    logger.info("[social] Facebook video URL: %s...", video_url[:80])
+    logger.info("[social] Facebook video_url=%s...", video_url[:80])
 
-    # Ambil judul dari og:title
+    # Step 4: Ambil judul dari og:title
     title = "Facebook video"
     tm = re.search(r'<meta property="og:title" content="([^"]*)"', html)
     if tm:
         title = tm.group(1) or title
 
+    # Step 5: Download video
     dest = os.path.join(work_dir, "001_video.mp4")
     req2 = urllib.request.Request(
         video_url,
-        headers={
-            "User-Agent": _FB_UA,
-            "Referer":    "https://www.facebook.com/",
-        },
+        headers={"User-Agent": _FB_UA, "Referer": "https://www.facebook.com/"},
     )
     try:
         with urllib.request.urlopen(req2, timeout=300) as r:
