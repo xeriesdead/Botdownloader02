@@ -137,74 +137,24 @@ def _classify_ytdlp_error(message: str) -> str:
     )
 
 
-def _fbcdn_photo_key(url: str) -> str:
-    """
-    Kunci deduplikasi untuk foto fbcdn: ambil nama file dasar tanpa query string.
-    Foto yang sama dengan ukuran berbeda (s480x480, s960x960, full) punya
-    nama file yang sama → terdeteksi sebagai duplikat.
-    Contoh: '.../s960x960/123456_789_n.jpg?_nc_...' → '123456_789_n.jpg'
-    """
-    clean = url.replace("\\/", "/").split("?")[0]
-    return clean.rstrip("/").split("/")[-1]
-
-
 def _extract_facebook_photo_urls(html: str) -> list[str]:
     """
-    Ekstrak URL foto fbcdn dari HTML Facebook (www maupun mbasic).
-    Deduplikasi berdasarkan nama file foto (bukan full URL) agar foto yang
-    sama di berbagai ukuran tidak diunduh berkali-kali.
-    Mengembalikan list URL unik dengan kualitas tertinggi yang ditemukan duluan.
+    Ekstrak URL foto utama dari og:image di HTML Facebook.
+    Hanya mengembalikan 1 URL (foto utama post) untuk menghindari duplikat
+    yang timbul jika mengekstrak dari JSON/img tag (banyak ukuran berbeda).
+    Cobalt API adalah strategi utama untuk album multi-foto.
     """
     import re
-
-    seen_urls: set[str] = set()   # full URL dedup
-    seen_keys: set[str] = set()   # filename dedup (tangkap duplikat beda ukuran)
-    urls: list[str] = []
-
-    def _add(raw: str) -> None:
-        clean = (
-            raw.replace("\\u0026", "&")
-               .replace("\\/", "/")
-               .replace("\\\\", "\\")
-        )
-        if not clean or "fbcdn" not in clean:
-            return
-        if clean in seen_urls:
-            return
-        key = _fbcdn_photo_key(clean)
-        if key in seen_keys:
-            return          # sama foto, ukuran berbeda — skip
-        seen_urls.add(clean)
-        seen_keys.add(key)
-        urls.append(clean)
-
-    # og:image — handle KEDUA urutan atribut (Facebook sering tulis content duluan)
-    for pat in [
-        r'<meta\b[^>]*\bproperty="og:image(?::secure_url)?"\b[^>]*\bcontent="([^"]+)"',
-        r'<meta\b[^>]*\bcontent="([^"]+)"\b[^>]*\bproperty="og:image(?::secure_url)?"',
-    ]:
-        for m in re.finditer(pat, html):
-            _add(m.group(1))
-
-    # JSON internal Facebook — URL fbcdn boleh pakai escaped slash (\/)
-    for pat in [
-        r'"uri"\s*:\s*"([^"]*fbcdn[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
-        r'"src"\s*:\s*"([^"]*fbcdn[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
-        r'"url"\s*:\s*"([^"]*fbcdn[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
-    ]:
-        for m in re.finditer(pat, html):
-            _add(m.group(1))
-
-    # img tag (mbasic.facebook.com — server-rendered)
-    for m in re.finditer(
-        r'<img\b[^>]*\bsrc="(https://[^"]*fbcdn\.net[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
-        html,
+    for pat in (
+        r'<meta\b[^>]*\bproperty="og:image"\b[^>]*\bcontent="([^"]+)"',
+        r'<meta\b[^>]*\bcontent="([^"]+)"\b[^>]*\bproperty="og:image"',
     ):
-        _add(m.group(1))
-
-    # Buang thumbnail sangat kecil (s32x32, s64x64, s160x160, dll.)
-    no_tiny = [u for u in urls if not re.search(r'/s\d{2,3}x\d{2,3}/', u)]
-    return (no_tiny or urls)[:20]  # maks 20 foto unik
+        m = re.search(pat, html)
+        if m:
+            url = m.group(1).replace("\\u0026", "&").replace("\\/", "/")
+            if "fbcdn" in url:
+                return [url]
+    return []
 
 
 def _facebook_html_scrape_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
