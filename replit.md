@@ -44,3 +44,6 @@ download gagal atau dibatalkan.
 - Bot ini dideploy ke Railway dalam mode polling always-on karena bot perlu
   proses yang terus berjalan dan memiliki dependency native (tgcrypto,
   pyrofork, psycopg2-binary).
+- Setiap perubahan kode harus di-commit dan di-push ke GitHub (`origin/main`)
+  agar Railway otomatis redeploy. Gunakan `gitPush({})` via git-remote skill
+  setelah setiap perubahan.
