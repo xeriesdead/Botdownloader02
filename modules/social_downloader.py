@@ -157,23 +157,34 @@ def _extract_facebook_photo_urls(html: str) -> list[str]:
             seen.add(clean)
             urls.append(clean)
 
-    # Pola JSON — fbcdn image (www.facebook.com)
+    # og:image — handle KEDUA urutan atribut (Facebook sering tulis content duluan)
     for pat in [
-        # JSON internal Facebook: "uri":"https://...fbcdn...jpg..."
-        r'"uri"\s*:\s*"(https://[^"]+\.fbcdn\.net/v/[^"]*\.jpg[^"]*)"',
-        r'"src"\s*:\s*"(https://[^"]+\.fbcdn\.net/v/[^"]*\.jpg[^"]*)"',
-        r'"url"\s*:\s*"(https://[^"]+\.fbcdn\.net/v/[^"]*\.jpg[^"]*)"',
-        # og:image (sering kualitas tinggi)
-        r'<meta property="og:image(?::secure_url)?" content="([^"]+)"',
-        # img tag dengan fbcdn (mbasic)
-        r'<img[^>]+src="(https://[^"]+\.fbcdn\.net/[^"]*\.jpg[^"]*)"',
+        r'<meta\b[^>]*\bproperty="og:image(?::secure_url)?"\b[^>]*\bcontent="([^"]+)"',
+        r'<meta\b[^>]*\bcontent="([^"]+)"\b[^>]*\bproperty="og:image(?::secure_url)?"',
     ]:
         for m in re.finditer(pat, html):
             _add(m.group(1))
 
-    # Hilangkan URL yang tampak seperti thumbnail kecil (s320x320, s160x160, dll.)
-    filtered = [u for u in urls if not re.search(r'/s\d{2,3}x\d{2,3}/', u)]
-    return (filtered or urls)[:20]  # maks 20 foto
+    # JSON internal Facebook — URL fbcdn boleh pakai escaped slash (\/)
+    for pat in [
+        r'"uri"\s*:\s*"([^"]*fbcdn[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
+        r'"src"\s*:\s*"([^"]*fbcdn[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
+        r'"url"\s*:\s*"([^"]*fbcdn[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
+    ]:
+        for m in re.finditer(pat, html):
+            _add(m.group(1))
+
+    # img tag (mbasic.facebook.com — server-rendered)
+    for m in re.finditer(
+        r'<img\b[^>]*\bsrc="(https://[^"]*fbcdn\.net[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
+        html,
+    ):
+        _add(m.group(1))
+
+    # Filter: buang URL yang bukan fbcdn dan thumbnail sangat kecil
+    fbcdn_only  = [u for u in urls if "fbcdn" in u]
+    no_tiny     = [u for u in fbcdn_only if not re.search(r'/s\d{2,3}x\d{2,3}/', u)]
+    return (no_tiny or fbcdn_only or urls)[:20]  # maks 20 foto
 
 
 def _facebook_html_scrape_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
@@ -268,11 +279,16 @@ def _facebook_html_scrape_sync(url: str, work_dir: str) -> tuple[str, list[str]]
                 video_url = m.group(1)
                 break
 
-    # Step 4: Ambil judul dari og:title
+    # Step 4: Ambil judul dari og:title — handle kedua urutan atribut
     title = "Facebook"
-    tm = re.search(r'<meta property="og:title" content="([^"]*)"', html)
-    if tm:
-        title = tm.group(1) or title
+    for _tp in (
+        r'<meta\b[^>]*\bproperty="og:title"\b[^>]*\bcontent="([^"]*)"',
+        r'<meta\b[^>]*\bcontent="([^"]*)"\b[^>]*\bproperty="og:title"',
+    ):
+        tm = re.search(_tp, html)
+        if tm:
+            title = tm.group(1) or title
+            break
 
     def _dl_url(src: str, dest: str) -> None:
         req2 = urllib.request.Request(
@@ -390,10 +406,19 @@ def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
             last_error = str(exc)
             logger.warning("[social] Facebook: strategi %s gagal: %s", name, exc)
 
+    # Deteksi jenis konten dari URL agar pesan error tepat
+    _ul = url.lower()
+    if any(x in _ul for x in ("/share/p/", "/photo/", "/photos/")):
+        _media = "foto"
+    elif any(x in _ul for x in ("/share/v/", "/videos/", "/video/", "/reel/")):
+        _media = "video atau Reel"
+    else:
+        _media = "konten"
+
     raise ValueError(
-        "❌ Gagal mendownload video Facebook.\n"
-        "Pastikan video bersifat <b>publik</b> dan link masih aktif.\n\n"
-        "<i>Video privat, yang hanya untuk teman, atau yang memerlukan "
+        f"❌ Gagal mendownload {_media} Facebook.\n"
+        "Pastikan konten bersifat <b>publik</b> dan link masih aktif.\n\n"
+        "<i>Konten privat, yang hanya untuk teman, atau yang memerlukan "
         "login tidak bisa didownload.</i>"
     )
 

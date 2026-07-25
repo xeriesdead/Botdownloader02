@@ -276,7 +276,11 @@ def setup(app):
             except Exception as exc:
                 logger.error("[social] download uid=%s: %s", uid, exc, exc_info=True)
                 refund_quota()
-                await edit(f"❌ Gagal mendownload media sosial: {exc}")
+                err_str = str(exc)
+                if err_str.startswith("❌"):
+                    await edit(err_str)
+                else:
+                    await edit(f"❌ Gagal mendownload media sosial:\n{err_str}")
             finally:
                 if work_dir:
                     cleanup_download(work_dir)
