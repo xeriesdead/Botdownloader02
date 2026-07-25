@@ -165,8 +165,8 @@ _PEER_RESOLVE_TIMEOUT  = 20   # detik — batas waktu resolve peer & get_chat
 _MSG_FETCH_TIMEOUT     = 25   # detik — batas waktu get_messages
 _ACCESS_CHECK_TIMEOUT  = 12   # detik — batas waktu pre-flight cek akses channel
 _DOWNLOAD_TIMEOUT      = 120  # detik — batas waktu download satu file via Pyrogram (2 menit)
-_UPLOAD_TIMEOUT        = 90   # detik — batas waktu upload satu file ke Bot API (90 detik)
-_ALBUM_UPLOAD_TIMEOUT  = 120  # detik — batas waktu upload seluruh album (2 menit)
+_UPLOAD_TIMEOUT        = 300  # detik — batas waktu upload satu file ke Bot API (5 menit)
+_ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file — dipakai di _send_album_via_bot
 
 # Timeout PTB untuk operasi upload ke Bot API
 _PTB_WRITE_TIMEOUT   = 90    # detik
@@ -419,6 +419,8 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                     await on_progress(f"📤 <b>Mengirim album...</b> ({len(paths)}/{total})")
                 except Exception:
                     pass
+            # Timeout proporsional: 120 detik per file + 60 detik buffer
+            _album_timeout = len(paths) * _ALBUM_UPLOAD_TIMEOUT_PER_FILE + 60
             await asyncio.wait_for(
                 bot.send_media_group(
                     user_chat_id,
@@ -427,7 +429,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                     read_timeout=_PTB_READ_TIMEOUT,
                     connect_timeout=_PTB_CONNECT_TIMEOUT,
                 ),
-                timeout=_ALBUM_UPLOAD_TIMEOUT,
+                timeout=_album_timeout,
             )
     finally:
         for f in handles:
@@ -574,63 +576,10 @@ async def _send_album_individually(
     if not paths:
         return False, "Gagal mendownload semua file dalam album."
 
-    # Coba kirim sebagai album (send_media_group) dulu agar tetap tampil sebagai album
-    if on_progress:
-        try:
-            await on_progress(f"📤 <b>Mengirim album...</b> ({len(paths)}/{total})")
-        except Exception:
-            pass
-
-    album_sent = False
-    handles = []
-    media_items = []
-    try:
-        for i, (m, path) in enumerate(paths):
-            caption = _build_caption(m.caption or "") if i == 0 else ""
-            f = open(path, "rb")
-            handles.append(f)
-            if m.photo:
-                media_items.append(InputMediaPhoto(media=f, caption=caption))
-            elif m.video:
-                media_items.append(InputMediaVideo(media=f, caption=caption))
-            elif m.audio:
-                media_items.append(InputMediaAudio(media=f, caption=caption))
-            elif m.animation:
-                media_items.append(InputMediaAnimation(media=f, caption=caption))
-            else:
-                media_items.append(InputMediaDocument(media=f, caption=caption))
-
-        if media_items:
-            await asyncio.wait_for(
-                bot.send_media_group(
-                    user_chat_id,
-                    media=media_items,
-                    write_timeout=_PTB_WRITE_TIMEOUT,
-                    read_timeout=_PTB_READ_TIMEOUT,
-                    connect_timeout=_PTB_CONNECT_TIMEOUT,
-                ),
-                timeout=_ALBUM_UPLOAD_TIMEOUT,
-            )
-            album_sent = True
-    except Exception as e:
-        logger.warning(f"send_media_group gagal untuk album msg {msg_id}, kirim satu per satu: {e}")
-    finally:
-        for f in handles:
-            try:
-                f.close()
-            except Exception:
-                pass
-        if album_sent:
-            # Berhasil kirim sebagai album — bersihkan semua file download
-            for _, path in paths:
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-            return True, None
-
-    # Fallback terakhir: kirim satu per satu
-    # File > 50 MB dikirim via Pyrogram MTProto (ke Saved Messages) agar bypass limit Bot API.
+    # Kirim satu per satu dengan progress per file.
+    # send_media_group sengaja dilewati di sini karena fungsi ini adalah fallback
+    # path (channel restricted / setelah send_media_group utama gagal) dan
+    # send_media_group untuk banyak file besar sering hang tanpa bisa dicancel.
     sent          = 0
     large_sent    = 0
     n_paths       = len(paths)
