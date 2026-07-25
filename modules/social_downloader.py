@@ -137,9 +137,9 @@ def _classify_ytdlp_error(message: str) -> str:
     )
 
 
-def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+def _facebook_html_scrape_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
-    Download video Facebook dengan scraping halaman HTML langsung.
+    Last-resort: Download video Facebook dengan scraping halaman HTML langsung.
     Mendukung semua format URL Facebook termasuk /share/, /watch/, /reel/, dll.
     Strategi:
       1. Kunjungi homepage Facebook dulu untuk dapat cookies sesi (datr, sb).
@@ -231,9 +231,7 @@ def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
 
     if not video_url:
         raise ValueError(
-            "❌ Gagal mendapatkan URL video dari Facebook.\n"
-            "Pastikan video bersifat <b>publik</b> dan link masih aktif.\n\n"
-            "<i>Video privat atau yang hanya untuk teman tidak bisa didownload.</i>"
+            "Tidak ada URL video yang ditemukan di HTML Facebook."
         )
 
     logger.info("[social] Facebook video_url=%s...", video_url[:80])
@@ -259,9 +257,87 @@ def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
                         break
                     f.write(chunk)
     except Exception as exc:
-        raise ValueError(f"❌ Gagal mengunduh video Facebook: {exc}") from exc
+        raise ValueError(f"Gagal mengunduh video Facebook via HTML scrape: {exc}") from exc
 
     return title, [dest]
+
+
+def _facebook_ytdlp_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+    """
+    Fallback: Download video Facebook via yt-dlp dengan opsi khusus Facebook.
+    """
+    before = {str(p) for p in Path(work_dir).rglob("*") if p.is_file()}
+    output_template = str(Path(work_dir) / "%(autonumber)03d_%(title).80s.%(ext)s")
+    options = {
+        "outtmpl":              output_template,
+        "format":               "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "merge_output_format":  "mp4",
+        "noplaylist":           True,
+        "quiet":                True,
+        "no_warnings":          True,
+        "no_color":             True,
+        "restrictfilenames":    True,
+        "writethumbnail":       False,
+        "writeinfojson":        False,
+        "writesubtitles":       False,
+        "writeautomaticsub":    False,
+        "socket_timeout":       20,
+        "retries":              3,
+        "fragment_retries":     3,
+        "http_headers": {
+            "User-Agent": _FB_UA,
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    }
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=True)
+
+    title = (info or {}).get("title") or "Facebook video"
+    files = [
+        str(p) for p in Path(work_dir).rglob("*")
+        if p.is_file()
+        and str(p) not in before
+        and p.suffix.lower() not in _IGNORED_SUFFIXES
+    ]
+    if not files:
+        raise ValueError("yt-dlp: tidak ada file yang terdownload dari Facebook.")
+    return title, sorted(files)
+
+
+def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+    """
+    Download video Facebook — multi-strategy tanpa login:
+      1. cobalt.tools API  (paling handal untuk video & reel publik)
+      2. yt-dlp            (fallback, berhasil untuk banyak video embed publik)
+      3. HTML scraping     (last-resort, untuk URL yang tidak didukung API lain)
+    Setiap strategi ditulis ke subdirektori terpisah agar tidak saling mengganggu.
+    """
+    strategies = [
+        ("cobalt",      lambda d: _cobalt_download_sync(url, d)),
+        ("ytdlp",       lambda d: _facebook_ytdlp_sync(url, d)),
+        ("html-scrape", lambda d: _facebook_html_scrape_sync(url, d)),
+    ]
+
+    last_error = ""
+    for name, fn in strategies:
+        sub_dir = os.path.join(work_dir, name)
+        os.makedirs(sub_dir, exist_ok=True)
+        try:
+            logger.info("[social] Facebook: mencoba strategi %s: %s", name, url)
+            title, files = fn(sub_dir)
+            if files:
+                logger.info("[social] Facebook: berhasil dengan strategi %s (%d file)", name, len(files))
+                return title, files
+        except Exception as exc:
+            last_error = str(exc)
+            logger.warning("[social] Facebook: strategi %s gagal: %s", name, exc)
+
+    raise ValueError(
+        "❌ Gagal mendownload video Facebook.\n"
+        "Pastikan video bersifat <b>publik</b> dan link masih aktif.\n\n"
+        "<i>Video privat, yang hanya untuk teman, atau yang memerlukan "
+        "login tidak bisa didownload.</i>"
+    )
 
 
 def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
