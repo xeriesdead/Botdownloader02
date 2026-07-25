@@ -137,14 +137,28 @@ def _classify_ytdlp_error(message: str) -> str:
     )
 
 
+def _fbcdn_photo_key(url: str) -> str:
+    """
+    Kunci deduplikasi untuk foto fbcdn: ambil nama file dasar tanpa query string.
+    Foto yang sama dengan ukuran berbeda (s480x480, s960x960, full) punya
+    nama file yang sama → terdeteksi sebagai duplikat.
+    Contoh: '.../s960x960/123456_789_n.jpg?_nc_...' → '123456_789_n.jpg'
+    """
+    clean = url.replace("\\/", "/").split("?")[0]
+    return clean.rstrip("/").split("/")[-1]
+
+
 def _extract_facebook_photo_urls(html: str) -> list[str]:
     """
     Ekstrak URL foto fbcdn dari HTML Facebook (www maupun mbasic).
-    Mengembalikan list URL unik, diprioritaskan dari kualitas tertinggi.
+    Deduplikasi berdasarkan nama file foto (bukan full URL) agar foto yang
+    sama di berbagai ukuran tidak diunduh berkali-kali.
+    Mengembalikan list URL unik dengan kualitas tertinggi yang ditemukan duluan.
     """
     import re
 
-    seen: set[str] = set()
+    seen_urls: set[str] = set()   # full URL dedup
+    seen_keys: set[str] = set()   # filename dedup (tangkap duplikat beda ukuran)
     urls: list[str] = []
 
     def _add(raw: str) -> None:
@@ -153,9 +167,16 @@ def _extract_facebook_photo_urls(html: str) -> list[str]:
                .replace("\\/", "/")
                .replace("\\\\", "\\")
         )
-        if clean and clean not in seen:
-            seen.add(clean)
-            urls.append(clean)
+        if not clean or "fbcdn" not in clean:
+            return
+        if clean in seen_urls:
+            return
+        key = _fbcdn_photo_key(clean)
+        if key in seen_keys:
+            return          # sama foto, ukuran berbeda — skip
+        seen_urls.add(clean)
+        seen_keys.add(key)
+        urls.append(clean)
 
     # og:image — handle KEDUA urutan atribut (Facebook sering tulis content duluan)
     for pat in [
@@ -181,10 +202,9 @@ def _extract_facebook_photo_urls(html: str) -> list[str]:
     ):
         _add(m.group(1))
 
-    # Filter: buang URL yang bukan fbcdn dan thumbnail sangat kecil
-    fbcdn_only  = [u for u in urls if "fbcdn" in u]
-    no_tiny     = [u for u in fbcdn_only if not re.search(r'/s\d{2,3}x\d{2,3}/', u)]
-    return (no_tiny or fbcdn_only or urls)[:20]  # maks 20 foto
+    # Buang thumbnail sangat kecil (s32x32, s64x64, s160x160, dll.)
+    no_tiny = [u for u in urls if not re.search(r'/s\d{2,3}x\d{2,3}/', u)]
+    return (no_tiny or urls)[:20]  # maks 20 foto unik
 
 
 def _facebook_html_scrape_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
