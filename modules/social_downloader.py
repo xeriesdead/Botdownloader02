@@ -137,6 +137,45 @@ def _classify_ytdlp_error(message: str) -> str:
     )
 
 
+def _extract_facebook_photo_urls(html: str) -> list[str]:
+    """
+    Ekstrak URL foto fbcdn dari HTML Facebook (www maupun mbasic).
+    Mengembalikan list URL unik, diprioritaskan dari kualitas tertinggi.
+    """
+    import re
+
+    seen: set[str] = set()
+    urls: list[str] = []
+
+    def _add(raw: str) -> None:
+        clean = (
+            raw.replace("\\u0026", "&")
+               .replace("\\/", "/")
+               .replace("\\\\", "\\")
+        )
+        if clean and clean not in seen:
+            seen.add(clean)
+            urls.append(clean)
+
+    # Pola JSON — fbcdn image (www.facebook.com)
+    for pat in [
+        # JSON internal Facebook: "uri":"https://...fbcdn...jpg..."
+        r'"uri"\s*:\s*"(https://[^"]+\.fbcdn\.net/v/[^"]*\.jpg[^"]*)"',
+        r'"src"\s*:\s*"(https://[^"]+\.fbcdn\.net/v/[^"]*\.jpg[^"]*)"',
+        r'"url"\s*:\s*"(https://[^"]+\.fbcdn\.net/v/[^"]*\.jpg[^"]*)"',
+        # og:image (sering kualitas tinggi)
+        r'<meta property="og:image(?::secure_url)?" content="([^"]+)"',
+        # img tag dengan fbcdn (mbasic)
+        r'<img[^>]+src="(https://[^"]+\.fbcdn\.net/[^"]*\.jpg[^"]*)"',
+    ]:
+        for m in re.finditer(pat, html):
+            _add(m.group(1))
+
+    # Hilangkan URL yang tampak seperti thumbnail kecil (s320x320, s160x160, dll.)
+    filtered = [u for u in urls if not re.search(r'/s\d{2,3}x\d{2,3}/', u)]
+    return (filtered or urls)[:20]  # maks 20 foto
+
+
 def _facebook_html_scrape_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
     Last-resort: Download video Facebook dengan scraping halaman HTML langsung.
@@ -229,26 +268,17 @@ def _facebook_html_scrape_sync(url: str, work_dir: str) -> tuple[str, list[str]]
                 video_url = m.group(1)
                 break
 
-    if not video_url:
-        raise ValueError(
-            "Tidak ada URL video yang ditemukan di HTML Facebook."
-        )
-
-    logger.info("[social] Facebook video_url=%s...", video_url[:80])
-
     # Step 4: Ambil judul dari og:title
-    title = "Facebook video"
+    title = "Facebook"
     tm = re.search(r'<meta property="og:title" content="([^"]*)"', html)
     if tm:
         title = tm.group(1) or title
 
-    # Step 5: Download video
-    dest = os.path.join(work_dir, "001_video.mp4")
-    req2 = urllib.request.Request(
-        video_url,
-        headers={"User-Agent": _FB_UA, "Referer": "https://www.facebook.com/"},
-    )
-    try:
+    def _dl_url(src: str, dest: str) -> None:
+        req2 = urllib.request.Request(
+            src,
+            headers={"User-Agent": _FB_UA, "Referer": "https://www.facebook.com/"},
+        )
         with urllib.request.urlopen(req2, timeout=300) as r:
             with open(dest, "wb") as f:
                 while True:
@@ -256,10 +286,38 @@ def _facebook_html_scrape_sync(url: str, work_dir: str) -> tuple[str, list[str]]
                     if not chunk:
                         break
                     f.write(chunk)
-    except Exception as exc:
-        raise ValueError(f"Gagal mengunduh video Facebook via HTML scrape: {exc}") from exc
 
-    return title, [dest]
+    # Step 5a: Video ditemukan → download langsung
+    if video_url:
+        logger.info("[social] Facebook video_url=%s...", video_url[:80])
+        dest = os.path.join(work_dir, "001_video.mp4")
+        try:
+            _dl_url(video_url, dest)
+        except Exception as exc:
+            raise ValueError(f"Gagal mengunduh video Facebook via HTML scrape: {exc}") from exc
+        return title, [dest]
+
+    # Step 5b: Tidak ada video → cari URL foto
+    photo_urls = _extract_facebook_photo_urls(html)
+    if not photo_urls:
+        raise ValueError(
+            "Tidak ada URL video atau foto yang ditemukan di HTML Facebook."
+        )
+
+    logger.info("[social] Facebook: ditemukan %d foto dari HTML scrape", len(photo_urls))
+    files = []
+    for i, purl in enumerate(photo_urls, 1):
+        dest = os.path.join(work_dir, f"{i:03d}_photo.jpg")
+        try:
+            _dl_url(purl, dest)
+            files.append(dest)
+            logger.info("[social] Facebook photo %d downloaded: %d bytes", i, os.path.getsize(dest))
+        except Exception as exc:
+            logger.warning("[social] Facebook photo %d download failed: %s", i, exc)
+
+    if not files:
+        raise ValueError("Gagal mengunduh foto Facebook via HTML scrape.")
+    return title, sorted(files)
 
 
 def _facebook_ytdlp_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
@@ -379,15 +437,19 @@ def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
             f"<i>Kode: {code}</i>"
         )
 
-    def _dl(dl_url: str, dest: str) -> None:
+    def _dl(dl_url: str, dest: str) -> str:
+        """Download file ke dest, kembalikan Content-Type dari response."""
         req2 = urllib.request.Request(dl_url, headers={"User-Agent": _COBALT_UA})
+        content_type = "application/octet-stream"
         with urllib.request.urlopen(req2, timeout=120) as r:
+            content_type = r.headers.get("Content-Type", content_type)
             with open(dest, "wb") as f:
                 while True:
                     chunk = r.read(512 * 1024)
                     if not chunk:
                         break
                     f.write(chunk)
+        return content_type
 
     files: list[str] = []
 
@@ -395,11 +457,16 @@ def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         dl_url = data.get("url")
         if not dl_url:
             raise ValueError("❌ Tidak ada link download yang tersedia.")
-        # Tentukan ekstensi dari Content-Type atau fallback mp4
-        dest = os.path.join(work_dir, "001_video.mp4")
-        _dl(dl_url, dest)
+        # Download dulu ke file sementara, lalu rename sesuai Content-Type
+        tmp = os.path.join(work_dir, "001_media.tmp")
+        ct  = _dl(dl_url, tmp)
+        if "image" in ct:
+            dest = os.path.join(work_dir, "001_media.jpg")
+        else:
+            dest = os.path.join(work_dir, "001_media.mp4")
+        os.rename(tmp, dest)
         files.append(dest)
-        logger.info("[social] cobalt single downloaded: %d bytes", os.path.getsize(dest))
+        logger.info("[social] cobalt single downloaded: %d bytes (ct=%s)", os.path.getsize(dest), ct)
 
     elif status == "picker":
         items = data.get("picker") or []
