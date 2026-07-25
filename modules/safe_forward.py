@@ -164,14 +164,14 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
 _PEER_RESOLVE_TIMEOUT  = 20   # detik — batas waktu resolve peer & get_chat
 _MSG_FETCH_TIMEOUT     = 25   # detik — batas waktu get_messages
 _ACCESS_CHECK_TIMEOUT  = 12   # detik — batas waktu pre-flight cek akses channel
-_DOWNLOAD_TIMEOUT      = 300  # detik — batas waktu download satu file via Pyrogram (5 menit)
-_UPLOAD_TIMEOUT        = 300  # detik — batas waktu upload satu file ke Bot API (5 menit)
-_ALBUM_UPLOAD_TIMEOUT  = 600  # detik — batas waktu upload seluruh album (10 menit)
+_DOWNLOAD_TIMEOUT      = 120  # detik — batas waktu download satu file via Pyrogram (2 menit)
+_UPLOAD_TIMEOUT        = 90   # detik — batas waktu upload satu file ke Bot API (90 detik)
+_ALBUM_UPLOAD_TIMEOUT  = 120  # detik — batas waktu upload seluruh album (2 menit)
 
 # Timeout PTB untuk operasi upload ke Bot API
-_PTB_WRITE_TIMEOUT   = 300   # detik
-_PTB_READ_TIMEOUT    = 120   # detik
-_PTB_CONNECT_TIMEOUT = 30    # detik
+_PTB_WRITE_TIMEOUT   = 90    # detik
+_PTB_READ_TIMEOUT    = 60    # detik
+_PTB_CONNECT_TIMEOUT = 15    # detik
 
 
 async def check_channel_access(client, chat) -> tuple[bool, str]:
@@ -414,6 +414,11 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 media_items.append(InputMediaDocument(media=f, caption=caption))
 
         if media_items:
+            if on_progress:
+                try:
+                    await on_progress(f"📤 <b>Mengirim album...</b> ({len(paths)}/{total})")
+                except Exception:
+                    pass
             await asyncio.wait_for(
                 bot.send_media_group(
                     user_chat_id,
@@ -570,6 +575,12 @@ async def _send_album_individually(
         return False, "Gagal mendownload semua file dalam album."
 
     # Coba kirim sebagai album (send_media_group) dulu agar tetap tampil sebagai album
+    if on_progress:
+        try:
+            await on_progress(f"📤 <b>Mengirim album...</b> ({len(paths)}/{total})")
+        except Exception:
+            pass
+
     album_sent = False
     handles = []
     media_items = []
