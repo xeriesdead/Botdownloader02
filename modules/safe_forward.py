@@ -164,6 +164,14 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
 _PEER_RESOLVE_TIMEOUT  = 20   # detik — batas waktu resolve peer & get_chat
 _MSG_FETCH_TIMEOUT     = 25   # detik — batas waktu get_messages
 _ACCESS_CHECK_TIMEOUT  = 12   # detik — batas waktu pre-flight cek akses channel
+_DOWNLOAD_TIMEOUT      = 120  # detik — batas waktu download satu file via Pyrogram (2 menit)
+_UPLOAD_TIMEOUT        = 300  # detik — batas waktu upload satu file ke Bot API (5 menit)
+_ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file — dipakai di _send_album_via_bot
+
+# Timeout PTB untuk operasi upload ke Bot API
+_PTB_WRITE_TIMEOUT   = 90    # detik
+_PTB_READ_TIMEOUT    = 60    # detik
+_PTB_CONNECT_TIMEOUT = 15    # detik
 
 
 async def check_channel_access(client, chat) -> tuple[bool, str]:
@@ -284,36 +292,71 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
         if on_progress and file_size >= _PROGRESS_MIN_BYTES
         else None
     )
-    path = await client.download_media(msg, progress=dl_cb)
+    try:
+        path = await asyncio.wait_for(
+            client.download_media(msg, progress=dl_cb),
+            timeout=_DOWNLOAD_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
     if not path:
         raise RuntimeError("Download gagal, file tidak tersedia.")
 
     caption = _build_caption(msg.caption or "")
+    _kw = dict(
+        write_timeout=_PTB_WRITE_TIMEOUT,
+        read_timeout=_PTB_READ_TIMEOUT,
+        connect_timeout=_PTB_CONNECT_TIMEOUT,
+    )
     try:
         if msg.photo:
             with open(path, "rb") as f:
-                await bot.send_photo(user_chat_id, photo=f, caption=caption)
+                await asyncio.wait_for(
+                    bot.send_photo(user_chat_id, photo=f, caption=caption, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
         elif msg.video:
             with open(path, "rb") as f:
-                await bot.send_video(user_chat_id, video=f, caption=caption)
+                await asyncio.wait_for(
+                    bot.send_video(user_chat_id, video=f, caption=caption, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
         elif msg.audio:
             with open(path, "rb") as f:
-                await bot.send_audio(user_chat_id, audio=f, caption=caption)
+                await asyncio.wait_for(
+                    bot.send_audio(user_chat_id, audio=f, caption=caption, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
         elif msg.voice:
             with open(path, "rb") as f:
-                await bot.send_voice(user_chat_id, voice=f, caption=caption)
+                await asyncio.wait_for(
+                    bot.send_voice(user_chat_id, voice=f, caption=caption, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
         elif msg.video_note:
             with open(path, "rb") as f:
-                await bot.send_video_note(user_chat_id, video_note=f)
+                await asyncio.wait_for(
+                    bot.send_video_note(user_chat_id, video_note=f, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
         elif msg.animation:
             with open(path, "rb") as f:
-                await bot.send_animation(user_chat_id, animation=f, caption=caption)
+                await asyncio.wait_for(
+                    bot.send_animation(user_chat_id, animation=f, caption=caption, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
         elif msg.sticker:
             with open(path, "rb") as f:
-                await bot.send_sticker(user_chat_id, sticker=f)
+                await asyncio.wait_for(
+                    bot.send_sticker(user_chat_id, sticker=f, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
         else:
             with open(path, "rb") as f:
-                await bot.send_document(user_chat_id, document=f, caption=caption)
+                await asyncio.wait_for(
+                    bot.send_document(user_chat_id, document=f, caption=caption, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
     finally:
         try:
             os.remove(path)
@@ -357,10 +400,10 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             try:
                 path = await asyncio.wait_for(
                     client.download_media(m, progress=dl_cb),
-                    timeout=dl_timeout,
+                    timeout=_DOWNLOAD_TIMEOUT,
                 )
             except asyncio.TimeoutError:
-                logger.warning(f"Timeout download album item {i + 1}/{total} msg {m.id}")
+                logger.warning(f"Timeout download album item {i + 1}/{total} msg {m.id}, skip.")
                 continue
             if not path:
                 continue
@@ -382,7 +425,23 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 media_items.append(InputMediaDocument(media=f, caption=caption))
 
         if media_items:
-            await bot.send_media_group(user_chat_id, media=media_items)
+            if on_progress:
+                try:
+                    await on_progress(f"📤 <b>Mengirim album...</b> ({len(paths)}/{total})")
+                except Exception:
+                    pass
+            # Timeout proporsional: 120 detik per file + 60 detik buffer
+            _album_timeout = len(paths) * _ALBUM_UPLOAD_TIMEOUT_PER_FILE + 60
+            await asyncio.wait_for(
+                bot.send_media_group(
+                    user_chat_id,
+                    media=media_items,
+                    write_timeout=_PTB_WRITE_TIMEOUT,
+                    read_timeout=_PTB_READ_TIMEOUT,
+                    connect_timeout=_PTB_CONNECT_TIMEOUT,
+                ),
+                timeout=_album_timeout,
+            )
     finally:
         for f in handles:
             try:
@@ -417,7 +476,13 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
     show_progress = on_progress and file_size >= _PROGRESS_MIN_BYTES
     dl_cb = _make_pyrogram_progress(on_progress, "Mengunduh", file_size) if show_progress else None
 
-    path = await client.download_media(msg, progress=dl_cb)
+    try:
+        path = await asyncio.wait_for(
+            client.download_media(msg, progress=dl_cb),
+            timeout=_DOWNLOAD_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
     if not path:
         raise RuntimeError("Download gagal, file tidak tersedia.")
 
@@ -430,22 +495,46 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
     caption = _build_caption(msg.caption or "")
     try:
         if msg.photo:
-            await client.send_photo(bot_peer, path, caption=caption, progress=ul_cb)
+            await asyncio.wait_for(
+                client.send_photo(bot_peer, path, caption=caption, progress=ul_cb),
+                timeout=_UPLOAD_TIMEOUT,
+            )
         elif msg.video:
-            await client.send_video(bot_peer, path, caption=caption,
-                                    supports_streaming=True, progress=ul_cb)
+            await asyncio.wait_for(
+                client.send_video(bot_peer, path, caption=caption,
+                                  supports_streaming=True, progress=ul_cb),
+                timeout=_UPLOAD_TIMEOUT,
+            )
         elif msg.audio:
-            await client.send_audio(bot_peer, path, caption=caption, progress=ul_cb)
+            await asyncio.wait_for(
+                client.send_audio(bot_peer, path, caption=caption, progress=ul_cb),
+                timeout=_UPLOAD_TIMEOUT,
+            )
         elif msg.voice:
-            await client.send_voice(bot_peer, path, caption=caption, progress=ul_cb)
+            await asyncio.wait_for(
+                client.send_voice(bot_peer, path, caption=caption, progress=ul_cb),
+                timeout=_UPLOAD_TIMEOUT,
+            )
         elif msg.video_note:
-            await client.send_video_note(bot_peer, path, progress=ul_cb)
+            await asyncio.wait_for(
+                client.send_video_note(bot_peer, path, progress=ul_cb),
+                timeout=_UPLOAD_TIMEOUT,
+            )
         elif msg.animation:
-            await client.send_animation(bot_peer, path, caption=caption, progress=ul_cb)
+            await asyncio.wait_for(
+                client.send_animation(bot_peer, path, caption=caption, progress=ul_cb),
+                timeout=_UPLOAD_TIMEOUT,
+            )
         elif msg.sticker:
-            await client.send_sticker(bot_peer, path, progress=ul_cb)
+            await asyncio.wait_for(
+                client.send_sticker(bot_peer, path, progress=ul_cb),
+                timeout=_UPLOAD_TIMEOUT,
+            )
         else:
-            await client.send_document(bot_peer, path, caption=caption, progress=ul_cb)
+            await asyncio.wait_for(
+                client.send_document(bot_peer, path, caption=caption, progress=ul_cb),
+                timeout=_UPLOAD_TIMEOUT,
+            )
     finally:
         try:
             os.remove(path)
@@ -495,60 +584,22 @@ async def _send_album_individually(
         try:
             path = await asyncio.wait_for(
                 client.download_media(m, progress=dl_cb),
-                timeout=dl_timeout,
+                timeout=_DOWNLOAD_TIMEOUT,
             )
             if path:
                 paths.append((m, path))
         except asyncio.TimeoutError:
-            logger.warning(f"Timeout download album item {i + 1}/{total} msg {m.id}")
+            logger.warning(f"Timeout download album item {i + 1}/{total} msg {m.id}, skip.")
         except Exception as e:
             logger.warning(f"Gagal download file album msg {m.id}: {e}")
 
     if not paths:
         return False, "Gagal mendownload semua file dalam album."
 
-    # Coba kirim sebagai album (send_media_group) dulu agar tetap tampil sebagai album
-    album_sent = False
-    handles = []
-    media_items = []
-    try:
-        for i, (m, path) in enumerate(paths):
-            caption = _build_caption(m.caption or "") if i == 0 else ""
-            f = open(path, "rb")
-            handles.append(f)
-            if m.photo:
-                media_items.append(InputMediaPhoto(media=f, caption=caption))
-            elif m.video:
-                media_items.append(InputMediaVideo(media=f, caption=caption))
-            elif m.audio:
-                media_items.append(InputMediaAudio(media=f, caption=caption))
-            elif m.animation:
-                media_items.append(InputMediaAnimation(media=f, caption=caption))
-            else:
-                media_items.append(InputMediaDocument(media=f, caption=caption))
-
-        if media_items:
-            await bot.send_media_group(user_chat_id, media=media_items)
-            album_sent = True
-    except Exception as e:
-        logger.warning(f"send_media_group gagal untuk album msg {msg_id}, kirim satu per satu: {e}")
-    finally:
-        for f in handles:
-            try:
-                f.close()
-            except Exception:
-                pass
-        if album_sent:
-            # Berhasil kirim sebagai album — bersihkan semua file download
-            for _, path in paths:
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-            return True, None
-
-    # Fallback terakhir: kirim satu per satu
-    # File > 50 MB dikirim via Pyrogram MTProto (ke Saved Messages) agar bypass limit Bot API.
+    # Kirim satu per satu dengan progress per file.
+    # send_media_group sengaja dilewati di sini karena fungsi ini adalah fallback
+    # path (channel restricted / setelah send_media_group utama gagal) dan
+    # send_media_group untuk banyak file besar sering hang tanpa bisa dicancel.
     sent          = 0
     large_sent    = 0
     n_paths       = len(paths)
@@ -564,39 +615,83 @@ async def _send_album_individually(
             caption   = _build_caption(m.caption or "")
             file_size = _get_file_size(m) or 0
             bot_peer  = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+            _kw = dict(
+                write_timeout=_PTB_WRITE_TIMEOUT,
+                read_timeout=_PTB_READ_TIMEOUT,
+                connect_timeout=_PTB_CONNECT_TIMEOUT,
+            )
             if file_size > _BOT_API_UPLOAD_LIMIT:
                 # File terlalu besar untuk Bot API — kirim langsung ke chat bot
                 # via Pyrogram MTProto (bypass batas 50 MB, tanpa Saved Messages)
                 if m.photo:
-                    await client.send_photo(bot_peer, path, caption=caption)
+                    await asyncio.wait_for(
+                        client.send_photo(bot_peer, path, caption=caption),
+                        timeout=_UPLOAD_TIMEOUT,
+                    )
                 elif m.video:
-                    await client.send_video(bot_peer, path, caption=caption,
-                                            supports_streaming=True)
+                    await asyncio.wait_for(
+                        client.send_video(bot_peer, path, caption=caption,
+                                          supports_streaming=True),
+                        timeout=_UPLOAD_TIMEOUT,
+                    )
                 elif m.audio:
-                    await client.send_audio(bot_peer, path, caption=caption)
+                    await asyncio.wait_for(
+                        client.send_audio(bot_peer, path, caption=caption),
+                        timeout=_UPLOAD_TIMEOUT,
+                    )
                 elif m.voice:
-                    await client.send_voice(bot_peer, path, caption=caption)
+                    await asyncio.wait_for(
+                        client.send_voice(bot_peer, path, caption=caption),
+                        timeout=_UPLOAD_TIMEOUT,
+                    )
                 elif m.video_note:
-                    await client.send_video_note(bot_peer, path)
+                    await asyncio.wait_for(
+                        client.send_video_note(bot_peer, path),
+                        timeout=_UPLOAD_TIMEOUT,
+                    )
                 elif m.animation:
-                    await client.send_animation(bot_peer, path, caption=caption)
+                    await asyncio.wait_for(
+                        client.send_animation(bot_peer, path, caption=caption),
+                        timeout=_UPLOAD_TIMEOUT,
+                    )
                 else:
-                    await client.send_document(bot_peer, path, caption=caption)
+                    await asyncio.wait_for(
+                        client.send_document(bot_peer, path, caption=caption),
+                        timeout=_UPLOAD_TIMEOUT,
+                    )
                 large_sent += 1
             else:
                 with open(path, "rb") as f:
                     if m.photo:
-                        await bot.send_photo(user_chat_id, photo=f, caption=caption)
+                        await asyncio.wait_for(
+                            bot.send_photo(user_chat_id, photo=f, caption=caption, **_kw),
+                            timeout=_UPLOAD_TIMEOUT,
+                        )
                     elif m.video:
-                        await bot.send_video(user_chat_id, video=f, caption=caption)
+                        await asyncio.wait_for(
+                            bot.send_video(user_chat_id, video=f, caption=caption, **_kw),
+                            timeout=_UPLOAD_TIMEOUT,
+                        )
                     elif m.audio:
-                        await bot.send_audio(user_chat_id, audio=f, caption=caption)
+                        await asyncio.wait_for(
+                            bot.send_audio(user_chat_id, audio=f, caption=caption, **_kw),
+                            timeout=_UPLOAD_TIMEOUT,
+                        )
                     elif m.voice:
-                        await bot.send_voice(user_chat_id, voice=f, caption=caption)
+                        await asyncio.wait_for(
+                            bot.send_voice(user_chat_id, voice=f, caption=caption, **_kw),
+                            timeout=_UPLOAD_TIMEOUT,
+                        )
                     elif m.animation:
-                        await bot.send_animation(user_chat_id, animation=f, caption=caption)
+                        await asyncio.wait_for(
+                            bot.send_animation(user_chat_id, animation=f, caption=caption, **_kw),
+                            timeout=_UPLOAD_TIMEOUT,
+                        )
                     else:
-                        await bot.send_document(user_chat_id, document=f, caption=caption)
+                        await asyncio.wait_for(
+                            bot.send_document(user_chat_id, document=f, caption=caption, **_kw),
+                            timeout=_UPLOAD_TIMEOUT,
+                        )
             sent += 1
         except Exception as e:
             logger.warning(f"Gagal kirim file album msg {m.id}: {e}")

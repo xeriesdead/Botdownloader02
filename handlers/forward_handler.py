@@ -273,6 +273,16 @@ def setup(app):
                     )
                     await edit(status)
                     await _quota_warn(bot, chat_id, uid)
+            except asyncio.CancelledError:
+                refund_quota()
+                try:
+                    await edit(
+                        "❌ <b>Timeout:</b> Proses terlalu lama dan dibatalkan.\n"
+                        "Coba lagi — jika terus gagal, file mungkin terlalu besar."
+                    )
+                except Exception:
+                    pass
+                raise
             except Exception as exc:
                 logger.error("[social] download uid=%s: %s", uid, exc, exc_info=True)
                 refund_quota()
@@ -424,6 +434,18 @@ def setup(app):
                                 html=True,
                             )
                             await _quota_warn(bot, chat_id, uid)
+                except asyncio.CancelledError:
+                    # Job dibatalkan oleh queue (timeout global) — beri tahu user
+                    QuotaService.add_quota(uid, 1)
+                    try:
+                        await _edit_s(
+                            "❌ <b>Timeout:</b> Proses terlalu lama dan dibatalkan.\n"
+                            "Coba lagi — jika terus gagal, file mungkin terlalu besar.",
+                            html=True,
+                        )
+                    except Exception:
+                        pass
+                    raise  # re-raise agar queue worker tahu job selesai
                 except Exception as e:
                     logger.error(f"get single job error uid={uid}: {e}", exc_info=True)
                     QuotaService.add_quota(uid, 1)
@@ -687,6 +709,16 @@ def setup(app):
 
                         if not cancelled:
                             await _quota_warn(bot, chat_id, uid)
+                except asyncio.CancelledError:
+                    QuotaService.add_quota(uid, count)
+                    try:
+                        await _edit_b(
+                            "❌ <b>Timeout:</b> Proses terlalu lama dan dibatalkan.\n"
+                            "Coba lagi — jika terus gagal, file mungkin terlalu besar."
+                        )
+                    except Exception:
+                        pass
+                    raise
                 except Exception as e:
                     logger.error(f"get bulk job error uid={uid}: {e}", exc_info=True)
                     QuotaService.add_quota(uid, count)
@@ -902,6 +934,16 @@ def setup(app):
                         reply_markup=notif_markup,
                     )
                     await _quota_warn(context.bot, chat_id, uid)
+            except asyncio.CancelledError:
+                QuotaService.add_quota(uid, n)
+                try:
+                    await _edit_r(
+                        "❌ <b>Timeout:</b> Proses terlalu lama dan dibatalkan.\n"
+                        "Coba lagi — jika terus gagal, file mungkin terlalu besar."
+                    )
+                except Exception:
+                    pass
+                raise
             except Exception as e:
                 logger.error(f"retry job error uid={uid}: {e}", exc_info=True)
                 QuotaService.add_quota(uid, n)
