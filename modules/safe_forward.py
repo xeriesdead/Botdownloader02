@@ -336,14 +336,32 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
 
     try:
         for i, m in enumerate(msgs):
-            if on_progress:
+            file_size = _get_file_size(m) or 0
+            # Timeout dinamis: min 60 detik, +30 detik per 10 MB
+            dl_timeout = max(60, 30 + (file_size // (10 * 1024 * 1024)) * 30)
+            # Callback progress per-file (hanya untuk file ≥ PROGRESS_MIN_BYTES)
+            dl_cb = None
+            if on_progress and file_size >= _PROGRESS_MIN_BYTES:
+                dl_cb = _make_pyrogram_progress(
+                    on_progress,
+                    f"Mengunduh ({i + 1}/{total})",
+                    file_size,
+                )
+            elif on_progress:
                 try:
                     await on_progress(
-                        f"📥 <b>Mempersiapkan album...</b> ({i + 1}/{total})"
+                        f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})"
                     )
                 except Exception:
                     pass
-            path = await client.download_media(m)
+            try:
+                path = await asyncio.wait_for(
+                    client.download_media(m, progress=dl_cb),
+                    timeout=dl_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout download album item {i + 1}/{total} msg {m.id}")
+                continue
             if not path:
                 continue
             paths.append(path)
@@ -458,7 +476,16 @@ async def _send_album_individually(
     # Download semua file terlebih dahulu
     paths: list[str] = []
     for i, m in enumerate(msgs):
-        if on_progress:
+        file_size  = _get_file_size(m) or 0
+        dl_timeout = max(60, 30 + (file_size // (10 * 1024 * 1024)) * 30)
+        dl_cb = None
+        if on_progress and file_size >= _PROGRESS_MIN_BYTES:
+            dl_cb = _make_pyrogram_progress(
+                on_progress,
+                f"Mengunduh ({i + 1}/{total})",
+                file_size,
+            )
+        elif on_progress:
             try:
                 await on_progress(
                     f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})"
@@ -466,9 +493,14 @@ async def _send_album_individually(
             except Exception:
                 pass
         try:
-            path = await client.download_media(m)
+            path = await asyncio.wait_for(
+                client.download_media(m, progress=dl_cb),
+                timeout=dl_timeout,
+            )
             if path:
                 paths.append((m, path))
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout download album item {i + 1}/{total} msg {m.id}")
         except Exception as e:
             logger.warning(f"Gagal download file album msg {m.id}: {e}")
 

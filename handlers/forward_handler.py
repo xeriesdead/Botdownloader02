@@ -381,8 +381,9 @@ def setup(app):
 
             async def single_job():
                 try:
+                    # Tampilkan "Memulai" sebelum tunggu lock — bisa ada job lain yang sedang pegang lock
                     await _edit_s(
-                        f"⏳ Sedang mengunduh...\n📦 Sisa quota: <b>{quota_disp}</b>",
+                        f"🔄 <b>Memulai download...</b>\n📦 Sisa quota: <b>{quota_disp}</b>",
                         html=True,
                     )
 
@@ -390,6 +391,12 @@ def setup(app):
                         await _edit_s(text, html=True)
 
                     async with lock:
+                        # Baru di sini proses benar-benar berjalan
+                        await _edit_s(
+                            f"⏳ <b>Sedang mengunduh...</b>\n📦 Sisa quota: <b>{quota_disp}</b>",
+                            html=True,
+                        )
+
                         uc = await session_manager.get_for_chat(uid, chat)
                         if not uc:
                             QuotaService.add_quota(uid, 1)
@@ -432,14 +439,16 @@ def setup(app):
             if pos > 1:
                 await _edit_s(
                     f"📋 <b>Masuk antrian!</b>\n"
-                    f"Posisi kamu: <b>ke-{pos}</b> dalam antrian\n"
-                    f"⏳ Download akan dimulai setelah giliran tiba.\n\n"
+                    f"Posisi kamu: <b>ke-{pos}</b>\n"
+                    f"⏳ Menunggu download sebelumnya selesai...\n\n"
                     f"📦 Sisa quota: <b>{quota_disp}</b>",
                     html=True,
                 )
             else:
                 await _edit_s(
-                    f"⏳ Giliran kamu berikutnya!\n📦 Sisa quota: <b>{quota_disp}</b>",
+                    f"📋 <b>Masuk antrian!</b>\n"
+                    f"Posisi kamu: <b>ke-1</b> (giliran berikutnya)\n"
+                    f"📦 Sisa quota: <b>{quota_disp}</b>",
                     html=True,
                 )
             return
