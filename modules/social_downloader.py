@@ -63,6 +63,24 @@ _AUTH_PHRASES = (
     "members only",
 )
 
+# Transient server-side errors — worth retrying once automatically
+_TRANSIENT_PHRASES = (
+    "empty media response",
+    "instagram sent an empty",
+    "got http error 429",
+    "http error 500",
+    "http error 502",
+    "http error 503",
+    "http error 504",
+    "connection reset",
+    "temporarily unavailable",
+)
+
+
+def _is_transient_error(message: str) -> bool:
+    lower = message.lower()
+    return any(p in lower for p in _TRANSIENT_PHRASES)
+
 
 def is_social_link(url: str) -> bool:
     """True only for supported public social-media hostnames."""
@@ -716,6 +734,19 @@ async def download_public_media(url: str, user_id: int) -> tuple[str, list[str],
     try:
         title, files = await asyncio.to_thread(_download_sync, url, work_dir)
         return title, files, work_dir
+    except ValueError as exc:
+        # Retry sekali otomatis untuk error transien (misal Instagram empty media response)
+        if _is_transient_error(str(exc)):
+            logger.info("[social] transient error, retrying once in 3s: %s", exc)
+            await asyncio.sleep(3)
+            try:
+                title, files = await asyncio.to_thread(_download_sync, url, work_dir)
+                return title, files, work_dir
+            except Exception:
+                shutil.rmtree(work_dir, ignore_errors=True)
+                raise
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
     except Exception:
         shutil.rmtree(work_dir, ignore_errors=True)
         raise
