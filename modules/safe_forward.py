@@ -397,15 +397,24 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                     )
                 except Exception:
                     pass
-            try:
-                path = await asyncio.wait_for(
-                    client.download_media(m, progress=dl_cb),
-                    timeout=_DOWNLOAD_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout download album item {i + 1}/{total} msg {m.id}, skip.")
-                continue
+            path = None
+            for _dl_attempt in range(2):
+                try:
+                    path = await asyncio.wait_for(
+                        client.download_media(m, progress=dl_cb),
+                        timeout=dl_timeout,
+                    )
+                    if path:
+                        break
+                except (asyncio.TimeoutError, Exception) as _dl_err:
+                    logger.warning(
+                        f"Download album item {i + 1}/{total} msg {m.id} "
+                        f"attempt {_dl_attempt + 1} gagal: {_dl_err}"
+                    )
+                    if _dl_attempt == 0:
+                        await asyncio.sleep(2)
             if not path:
+                logger.error(f"Skip album item {i + 1}/{total} msg {m.id} setelah 2 percobaan.")
                 continue
             paths.append(path)
 
@@ -581,17 +590,26 @@ async def _send_album_individually(
                 )
             except Exception:
                 pass
-        try:
-            path = await asyncio.wait_for(
-                client.download_media(m, progress=dl_cb),
-                timeout=_DOWNLOAD_TIMEOUT,
-            )
-            if path:
-                paths.append((m, path))
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout download album item {i + 1}/{total} msg {m.id}, skip.")
-        except Exception as e:
-            logger.warning(f"Gagal download file album msg {m.id}: {e}")
+        path = None
+        for _dl_attempt in range(2):
+            try:
+                path = await asyncio.wait_for(
+                    client.download_media(m, progress=dl_cb),
+                    timeout=dl_timeout,
+                )
+                if path:
+                    break
+            except (asyncio.TimeoutError, Exception) as _dl_err:
+                logger.warning(
+                    f"Download album item {i + 1}/{total} msg {m.id} "
+                    f"attempt {_dl_attempt + 1} gagal: {_dl_err}"
+                )
+                if _dl_attempt == 0:
+                    await asyncio.sleep(2)
+        if path:
+            paths.append((m, path))
+        else:
+            logger.error(f"Skip album item {i + 1}/{total} msg {m.id} setelah 2 percobaan.")
 
     if not paths:
         return False, "Gagal mendownload semua file dalam album."
