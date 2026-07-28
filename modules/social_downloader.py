@@ -427,17 +427,34 @@ def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         },
         method="POST",
     )
-    try:
-        resp = urllib.request.urlopen(req, timeout=30)
-        data = _json.loads(resp.read())
-    except urllib.error.HTTPError as exc:
-        raise ValueError(
-            f"❌ Layanan download tidak tersedia saat ini (HTTP {exc.code}). Coba lagi nanti."
-        ) from exc
-    except Exception as exc:
-        raise ValueError(
-            "❌ Gagal menghubungi layanan download. Coba lagi nanti."
-        ) from exc
+    # Retry hingga 2x untuk error transien (429, 5xx, network blip)
+    _cobalt_last_exc: Exception | None = None
+    for _attempt in range(3):
+        try:
+            resp = urllib.request.urlopen(req, timeout=30)
+            data = _json.loads(resp.read())
+            _cobalt_last_exc = None
+            break
+        except urllib.error.HTTPError as exc:
+            _cobalt_last_exc = exc
+            if exc.code in (429, 500, 502, 503, 504) and _attempt < 2:
+                import time as _time
+                _time.sleep(3 * (_attempt + 1))
+                continue
+            raise ValueError(
+                f"❌ Layanan download tidak tersedia saat ini (HTTP {exc.code}). Coba lagi nanti."
+            ) from exc
+        except Exception as exc:
+            _cobalt_last_exc = exc
+            if _attempt < 2:
+                import time as _time
+                _time.sleep(3)
+                continue
+            raise ValueError(
+                "❌ Gagal menghubungi layanan download. Coba lagi nanti."
+            ) from exc
+    if _cobalt_last_exc:
+        raise ValueError("❌ Gagal menghubungi layanan download. Coba lagi nanti.") from _cobalt_last_exc
 
     status = data.get("status")
     logger.info("[social] cobalt status=%s url=%s", status, url)
@@ -586,20 +603,32 @@ def _tikwm_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     logger.info("[social] tikwm API request: %s", api_url)
 
     req = urllib.request.Request(api_url, headers={"User-Agent": _UA})
-    try:
-        resp = urllib.request.urlopen(req, timeout=20)
-        data = _json.loads(resp.read())
-    except Exception as exc:
-        raise ValueError(
-            "❌ Gagal menghubungi layanan download TikTok. Coba lagi nanti."
-        ) from exc
-
-    if data.get("code") != 0:
-        msg = data.get("msg") or "unknown error"
-        raise ValueError(
-            f"❌ Gagal mengambil info video TikTok: {msg}\n"
-            "Pastikan link masih aktif dan bersifat publik."
-        )
+    # Retry hingga 2x untuk network error atau kode non-0 yang bersifat transien
+    data: dict = {}
+    for _attempt in range(3):
+        try:
+            resp = urllib.request.urlopen(req, timeout=20)
+            data = _json.loads(resp.read())
+        except Exception as exc:
+            if _attempt < 2:
+                import time as _time
+                _time.sleep(3)
+                continue
+            raise ValueError(
+                "❌ Gagal menghubungi layanan download TikTok. Coba lagi nanti."
+            ) from exc
+        if data.get("code") == 0:
+            break
+        # Kode non-0: kemungkinan rate-limit sementara, coba lagi
+        if _attempt < 2:
+            import time as _time
+            _time.sleep(3)
+        else:
+            msg = data.get("msg") or "unknown error"
+            raise ValueError(
+                f"❌ Gagal mengambil info video TikTok: {msg}\n"
+                "Pastikan link masih aktif dan bersifat publik."
+            )
 
     v      = data.get("data") or {}
     title  = (v.get("title") or "TikTok video").strip()[:160] or "TikTok video"
@@ -672,8 +701,9 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         "writesubtitles": False,
         "writeautomaticsub": False,
         "socket_timeout": 20,
-        "retries": 2,
-        "fragment_retries": 2,
+        "retries": 3,
+        "fragment_retries": 3,
+        "extractor_retries": 3,
         "concurrent_fragment_downloads": 2,
     }
 
@@ -734,9 +764,13 @@ async def download_public_media(url: str, user_id: int) -> tuple[str, list[str],
     try:
         title, files = await asyncio.to_thread(_download_sync, url, work_dir)
         return title, files, work_dir
-    except ValueError as exc:
-        # Retry sekali otomatis untuk error transien (misal Instagram empty media response)
-        if _is_transient_error(str(exc)):
+    except Exception as exc:
+        # Retry sekali otomatis untuk error transien:
+        # - ValueError dengan pesan transien (misal Instagram empty media response)
+        # - Network-level errors: OSError, urllib.error.URLError, ConnectionError
+        _is_network_err = isinstance(exc, (OSError, ConnectionError))
+        _is_transient_val = isinstance(exc, ValueError) and _is_transient_error(str(exc))
+        if _is_transient_val or _is_network_err:
             logger.info("[social] transient error, retrying once in 3s: %s", exc)
             await asyncio.sleep(3)
             try:
@@ -745,9 +779,6 @@ async def download_public_media(url: str, user_id: int) -> tuple[str, list[str],
             except Exception:
                 shutil.rmtree(work_dir, ignore_errors=True)
                 raise
-        shutil.rmtree(work_dir, ignore_errors=True)
-        raise
-    except Exception:
         shutil.rmtree(work_dir, ignore_errors=True)
         raise
 
