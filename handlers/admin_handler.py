@@ -1,8 +1,26 @@
 import asyncio
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 
 from telegram.ext import CommandHandler
 from telegram.constants import ParseMode
+
+# ── Timezone helper ───────────────────────────────────────────────────────────
+_WIB = timezone(timedelta(hours=7))
+
+
+def _wib(ts) -> str:
+    """Konversi timestamp UTC (string atau datetime) ke jam WIB format HH:MM."""
+    try:
+        dt = datetime.fromisoformat(str(ts))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_WIB).strftime("%H:%M")
+    except Exception:
+        return str(ts)[11:16]
+
+
+def _today_wib() -> str:
+    return datetime.now(_WIB).strftime("%Y-%m-%d")
 
 from config import ADMIN_IDS
 from database.db import db
@@ -463,30 +481,29 @@ def setup(app):
         except ValueError:
             return await update.message.reply_text("❌ user_id harus berupa angka.")
 
-        filter_date = context.args[1] if len(context.args) > 1 else str(date.today())
+        filter_date = context.args[1] if len(context.args) > 1 else _today_wib()
         user = db.get_user(uid)
         uname = f"@{user['username']}" if user and user.get("username") else str(uid)
 
         rows = get_user_activity(uid, date=filter_date)
         if not rows:
             return await update.message.reply_text(
-                f"📭 Tidak ada aktivitas untuk <code>{uid}</code> pada <b>{filter_date}</b>.\n\n"
-                f"<i>Catatan: Fitur activity log mulai mencatat sejak bot di-deploy ulang hari ini. "
-                f"Aktivitas sebelum itu tidak tersimpan.</i>",
+                f"📭 Tidak ada aktivitas untuk <code>{uid}</code> pada <b>{filter_date}</b> (WIB).",
                 parse_mode=ParseMode.HTML,
             )
 
         _EVENT_ICON = {
-            "download":       "📥",
-            "download_bulk":  "📦",
-            "premium_granted":"💎",
-            "premium_expired":"⌛",
-            "premium_removed":"🗑",
+            "download":        "📥",
+            "download_bulk":   "📦",
+            "social_download": "🌐",
+            "premium_granted": "💎",
+            "premium_expired": "⌛",
+            "premium_removed": "🗑",
         }
-        lines = [f"📋 <b>Aktivitas {uname}</b> — <i>{filter_date}</i>\n{'─' * 30}"]
+        lines = [f"📋 <b>Aktivitas {uname}</b> — <i>{filter_date} WIB</i>\n{'─' * 30}"]
         for r in rows:
-            icon  = _EVENT_ICON.get(r["event_type"], "•")
-            waktu = r["created_at"][11:16]  # HH:MM
+            icon   = _EVENT_ICON.get(r["event_type"], "•")
+            waktu  = _wib(r["created_at"])
             detail = f" — <code>{r['detail']}</code>" if r["detail"] else ""
             lines.append(f"{icon} <b>{waktu}</b> {r['event_type']}{detail}")
 
@@ -495,27 +512,26 @@ def setup(app):
     # ── /recentactivity [YYYY-MM-DD] ─────────────────────────────────────
     @admin_only
     async def recent_activity(update, context):
-        filter_date = context.args[0] if context.args else str(date.today())
+        filter_date = context.args[0] if context.args else _today_wib()
         rows = get_recent_activity(date=filter_date, limit=30)
         if not rows:
             return await update.message.reply_text(
-                f"📭 Tidak ada aktivitas pada <b>{filter_date}</b>.\n\n"
-                f"<i>Catatan: Fitur activity log mulai mencatat sejak bot di-deploy ulang hari ini. "
-                f"Aktivitas sebelum itu tidak tersimpan.</i>",
+                f"📭 Tidak ada aktivitas pada <b>{filter_date}</b> (WIB).",
                 parse_mode=ParseMode.HTML,
             )
 
         _EVENT_ICON = {
-            "download":       "📥",
-            "download_bulk":  "📦",
-            "premium_granted":"💎",
-            "premium_expired":"⌛",
-            "premium_removed":"🗑",
+            "download":        "📥",
+            "download_bulk":   "📦",
+            "social_download": "🌐",
+            "premium_granted": "💎",
+            "premium_expired": "⌛",
+            "premium_removed": "🗑",
         }
-        lines = [f"📋 <b>Aktivitas Terbaru</b> — <i>{filter_date}</i>\n{'─' * 30}"]
+        lines = [f"📋 <b>Aktivitas Terbaru</b> — <i>{filter_date} WIB</i>\n{'─' * 30}"]
         for r in rows:
             icon   = _EVENT_ICON.get(r["event_type"], "•")
-            waktu  = r["created_at"][11:16]
+            waktu  = _wib(r["created_at"])
             uname  = f"@{r['username']}" if r.get("username") else str(r["user_id"])
             detail = f" <code>{r['detail']}</code>" if r["detail"] else ""
             lines.append(f"{icon} <b>{waktu}</b> {uname} — {r['event_type']}{detail}")
@@ -525,17 +541,15 @@ def setup(app):
     # ── /topdownloaders [YYYY-MM-DD] ─────────────────────────────────────
     @admin_only
     async def top_downloaders(update, context):
-        filter_date = context.args[0] if context.args else str(date.today())
+        filter_date = context.args[0] if context.args else _today_wib()
         rows = get_top_downloaders(date=filter_date, limit=10)
         if not rows:
             return await update.message.reply_text(
-                f"📭 Belum ada aktivitas download pada <b>{filter_date}</b>.\n\n"
-                f"<i>Catatan: Fitur activity log mulai mencatat sejak bot di-deploy ulang hari ini. "
-                f"Aktivitas sebelum itu tidak tersimpan.</i>",
+                f"📭 Belum ada aktivitas download pada <b>{filter_date}</b> (WIB).",
                 parse_mode=ParseMode.HTML,
             )
 
-        lines = [f"🏆 <b>Top Downloader</b> — <i>{filter_date}</i>\n{'─' * 30}"]
+        lines = [f"🏆 <b>Top Downloader</b> — <i>{filter_date} WIB</i>\n{'─' * 30}"]
         for i, r in enumerate(rows, 1):
             uname = f"@{r['username']}" if r.get("username") else str(r["user_id"])
             medal = ["🥇", "🥈", "🥉"][i - 1] if i <= 3 else f"{i}."
