@@ -1,3 +1,5 @@
+import re
+
 from telegram.ext import CommandHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 from pyrogram import Client as PyroClient
@@ -9,7 +11,23 @@ from config import API_ID, API_HASH
 from database.db import db
 from modules.session_manager import session_manager
 from modules.channel_guard import require_member
+from modules.social_downloader import is_social_link
+from modules.link_parser import parse_telegram_link
 from logger import logger
+
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def _extract_downloadable_url(text: str) -> str | None:
+    """Kembalikan URL pertama dalam teks yang bisa di-/get, atau None."""
+    for m in _URL_RE.finditer(text):
+        url = m.group(0).rstrip(".,;!?)")
+        if is_social_link(url):
+            return url
+        chat, msg_id = parse_telegram_link(url)
+        if chat and msg_id:
+            return url
+    return None
 
 # State machine per user
 # state: None | "wait_phone" | "wait_code" | "wait_password"
@@ -82,6 +100,17 @@ def setup(app):
         st   = _state.get(uid)
 
         if not st:
+            # ── Deteksi link sosmed / Telegram → sarankan /get ──────────────
+            url = _extract_downloadable_url(text)
+            if url:
+                await update.message.reply_text(
+                    "🔗 Terdeteksi link media!\n\n"
+                    "Gunakan perintah <b>/get</b> untuk mendownload:\n"
+                    f"<code>/get {url}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
             # Beri petunjuk jika input terlihat seperti nomor HP atau kode OTP
             stripped = text.replace(" ", "").replace("-", "")
             is_phone = text.startswith("+") and stripped[1:].isdigit() and len(stripped) > 6
