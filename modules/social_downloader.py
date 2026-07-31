@@ -688,36 +688,34 @@ def _tikwm_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     return title, sorted(files)
 
 
-def _youtube_ytdlp_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+def _youtube_try_player(url: str, work_dir: str, player_client: str) -> tuple[str, list[str]]:
     """
-    Download YouTube via yt-dlp dengan Android/iOS player client
-    untuk bypass bot detection tanpa cookies.
+    Coba download YouTube dengan satu player_client tertentu.
+    Lempar exception jika gagal.
     """
     before = {str(p) for p in Path(work_dir).rglob("*") if p.is_file()}
     output_template = str(Path(work_dir) / "%(autonumber)03d_%(title).80s.%(ext)s")
     options = {
-        "outtmpl":                      output_template,
-        "format":                       "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "merge_output_format":          "mp4",
-        "noplaylist":                   True,
-        "quiet":                        True,
-        "no_warnings":                  True,
-        "no_color":                     True,
-        "restrictfilenames":            True,
-        "writethumbnail":               False,
-        "writeinfojson":                False,
-        "writesubtitles":               False,
-        "writeautomaticsub":            False,
-        "socket_timeout":               30,
-        "retries":                      3,
-        "fragment_retries":             3,
-        "extractor_retries":            3,
+        "outtmpl":                       output_template,
+        "format":                        "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
+        "merge_output_format":           "mp4",
+        "noplaylist":                    True,
+        "quiet":                         True,
+        "no_warnings":                   True,
+        "no_color":                      True,
+        "restrictfilenames":             True,
+        "writethumbnail":                False,
+        "writeinfojson":                 False,
+        "writesubtitles":                False,
+        "writeautomaticsub":             False,
+        "socket_timeout":                30,
+        "retries":                       2,
+        "fragment_retries":              2,
+        "extractor_retries":             2,
         "concurrent_fragment_downloads": 2,
-        # Gunakan Android/iOS player client — bypass bot detection YouTube
-        # tanpa perlu cookies atau login
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios"],
+                "player_client": [player_client],
             }
         },
     }
@@ -732,39 +730,38 @@ def _youtube_ytdlp_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         and p.suffix.lower() not in _IGNORED_SUFFIXES
     ]
     if not files:
-        raise ValueError("yt-dlp: tidak ada file yang terdownload dari YouTube.")
+        raise ValueError(f"yt-dlp [{player_client}]: tidak ada file yang terdownload.")
     return title, sorted(files)
 
 
 def _youtube_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
-    Download YouTube — multi-strategy:
-      1. yt-dlp dengan Android/iOS player client (bypass bot detection)
-      2. cobalt.tools API sebagai fallback
+    Download YouTube — coba beberapa player_client yt-dlp satu per satu.
+    Urutan dipilih berdasarkan tingkat keberhasilan bypass bot detection:
+      mweb → tv_embedded → web_creator → ios → android
+    Cobalt tidak dipakai karena tidak mendukung YouTube (HTTP 400).
     """
-    strategies = [
-        ("ytdlp-android",   lambda d: _youtube_ytdlp_sync(url, d)),
-        ("cobalt",          lambda d: _cobalt_download_sync(url, d)),
-    ]
+    # Player client yang dicoba berurutan
+    _PLAYER_CLIENTS = ["mweb", "tv_embedded", "web_creator", "ios", "android"]
 
     last_error = ""
-    for name, fn in strategies:
-        sub_dir = os.path.join(work_dir, name)
+    for client in _PLAYER_CLIENTS:
+        sub_dir = os.path.join(work_dir, f"ytdlp-{client}")
         os.makedirs(sub_dir, exist_ok=True)
         try:
-            logger.info("[social] YouTube: mencoba strategi %s: %s", name, url)
-            title, files = fn(sub_dir)
+            logger.info("[social] YouTube: mencoba player_client=%s: %s", client, url)
+            title, files = _youtube_try_player(url, sub_dir, client)
             if files:
-                logger.info("[social] YouTube: berhasil dengan strategi %s (%d file)", name, len(files))
+                logger.info("[social] YouTube: berhasil dengan player_client=%s (%d file)", client, len(files))
                 return title, files
         except Exception as exc:
             last_error = str(exc)
-            logger.warning("[social] YouTube: strategi %s gagal: %s", name, exc)
+            logger.warning("[social] YouTube: player_client=%s gagal: %s", client, exc)
 
     raise ValueError(
         "❌ Gagal mendownload video YouTube.\n"
-        "Pastikan link masih aktif dan bersifat publik.\n\n"
-        f"<i>Detail: {last_error[:200]}</i>"
+        "YouTube saat ini memblokir download otomatis.\n\n"
+        "<i>Coba lagi dalam beberapa menit, atau download manual via browser.</i>"
     )
 
 
