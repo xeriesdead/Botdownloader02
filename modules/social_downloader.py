@@ -40,8 +40,9 @@ _FB_UA            = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-_TWITTER_DOMAINS = {"twitter.com", "x.com", "t.co"}
-_TIKTOK_DOMAINS  = {"tiktok.com", "vt.tiktok.com"}
+_TWITTER_DOMAINS  = {"twitter.com", "x.com", "t.co"}
+_TIKTOK_DOMAINS   = {"tiktok.com", "vt.tiktok.com"}
+_YOUTUBE_DOMAINS  = {"youtube.com", "youtu.be", "www.youtube.com", "m.youtube.com"}
 
 _TEMP_ROOT = "downloads"
 _IGNORED_SUFFIXES = {".part", ".ytdl", ".json", ".description", ".jpg.part"}
@@ -592,6 +593,16 @@ def _is_tiktok_link(url: str) -> bool:
     )
 
 
+def _is_youtube_link(url: str) -> bool:
+    try:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return any(
+        hostname == d or hostname.endswith(f".{d}") for d in _YOUTUBE_DOMAINS
+    )
+
+
 def _tikwm_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
     Download TikTok video/photo via tikwm.com public API (no auth required).
@@ -677,6 +688,86 @@ def _tikwm_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     return title, sorted(files)
 
 
+def _youtube_ytdlp_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+    """
+    Download YouTube via yt-dlp dengan Android/iOS player client
+    untuk bypass bot detection tanpa cookies.
+    """
+    before = {str(p) for p in Path(work_dir).rglob("*") if p.is_file()}
+    output_template = str(Path(work_dir) / "%(autonumber)03d_%(title).80s.%(ext)s")
+    options = {
+        "outtmpl":                      output_template,
+        "format":                       "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "merge_output_format":          "mp4",
+        "noplaylist":                   True,
+        "quiet":                        True,
+        "no_warnings":                  True,
+        "no_color":                     True,
+        "restrictfilenames":            True,
+        "writethumbnail":               False,
+        "writeinfojson":                False,
+        "writesubtitles":               False,
+        "writeautomaticsub":            False,
+        "socket_timeout":               30,
+        "retries":                      3,
+        "fragment_retries":             3,
+        "extractor_retries":            3,
+        "concurrent_fragment_downloads": 2,
+        # Gunakan Android/iOS player client — bypass bot detection YouTube
+        # tanpa perlu cookies atau login
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios"],
+            }
+        },
+    }
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=True)
+
+    title = (info or {}).get("title") or "YouTube video"
+    files = [
+        str(p) for p in Path(work_dir).rglob("*")
+        if p.is_file()
+        and str(p) not in before
+        and p.suffix.lower() not in _IGNORED_SUFFIXES
+    ]
+    if not files:
+        raise ValueError("yt-dlp: tidak ada file yang terdownload dari YouTube.")
+    return title, sorted(files)
+
+
+def _youtube_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+    """
+    Download YouTube — multi-strategy:
+      1. yt-dlp dengan Android/iOS player client (bypass bot detection)
+      2. cobalt.tools API sebagai fallback
+    """
+    strategies = [
+        ("ytdlp-android",   lambda d: _youtube_ytdlp_sync(url, d)),
+        ("cobalt",          lambda d: _cobalt_download_sync(url, d)),
+    ]
+
+    last_error = ""
+    for name, fn in strategies:
+        sub_dir = os.path.join(work_dir, name)
+        os.makedirs(sub_dir, exist_ok=True)
+        try:
+            logger.info("[social] YouTube: mencoba strategi %s: %s", name, url)
+            title, files = fn(sub_dir)
+            if files:
+                logger.info("[social] YouTube: berhasil dengan strategi %s (%d file)", name, len(files))
+                return title, files
+        except Exception as exc:
+            last_error = str(exc)
+            logger.warning("[social] YouTube: strategi %s gagal: %s", name, exc)
+
+    raise ValueError(
+        "❌ Gagal mendownload video YouTube.\n"
+        "Pastikan link masih aktif dan bersifat publik.\n\n"
+        f"<i>Detail: {last_error[:200]}</i>"
+    )
+
+
 def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """Run yt-dlp outside the event loop and return title plus downloaded paths."""
     before = {
@@ -706,6 +797,11 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         "extractor_retries": 3,
         "concurrent_fragment_downloads": 2,
     }
+
+    # ── YouTube: multi-strategy dengan Android/iOS player client ──────────
+    if _is_youtube_link(url):
+        logger.info("[social] YouTube detected, using multi-strategy: %s", url)
+        return _youtube_download_sync(url, work_dir)
 
     # ── TikTok: gunakan tikwm API (bypass geo-block) ─────────────────────
     if _is_tiktok_link(url):
