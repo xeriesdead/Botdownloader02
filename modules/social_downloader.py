@@ -375,6 +375,24 @@ def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
       3. HTML scraping     (last-resort, untuk URL yang tidak didukung API lain)
     Setiap strategi ditulis ke subdirektori terpisah agar tidak saling mengganggu.
     """
+    import urllib.error as _ue
+
+    # Frasa dalam pesan error yang menandakan kegagalan TRANSIEN (bukan konten privat)
+    _FB_TRANSIENT_PHRASES = (
+        "coba lagi nanti",
+        "layanan download tidak tersedia",
+        "gagal menghubungi layanan",
+        "connection reset",
+        "temporarily unavailable",
+        "http error 429",
+        "http error 500",
+        "http error 502",
+        "http error 503",
+        "http error 504",
+        "timed out",
+        "timeout",
+    )
+
     strategies = [
         ("cobalt",      lambda d: _cobalt_download_sync(url, d)),
         ("ytdlp",       lambda d: _facebook_ytdlp_sync(url, d)),
@@ -382,6 +400,7 @@ def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     ]
 
     last_error = ""
+    has_transient = False  # apakah ada error transien (bukan konten privat)?
     for name, fn in strategies:
         sub_dir = os.path.join(work_dir, name)
         os.makedirs(sub_dir, exist_ok=True)
@@ -394,6 +413,22 @@ def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         except Exception as exc:
             last_error = str(exc)
             logger.warning("[social] Facebook: strategi %s gagal: %s", name, exc)
+            # Tandai transien jika: network/OS error, atau pesan mengindikasikan masalah server sementara
+            _msg_lower = str(exc).lower()
+            if isinstance(exc, (OSError, ConnectionError, _ue.URLError)) or any(
+                p in _msg_lower for p in _FB_TRANSIENT_PHRASES
+            ):
+                has_transient = True
+
+    # Jika salah satu strategi gagal karena error transien (bukan konten privat),
+    # raise dengan pesan yang cocok _TRANSIENT_PHRASES agar download_public_media
+    # otomatis retry sekali setelah 3 detik.
+    if has_transient:
+        logger.info("[social] Facebook: semua strategi gagal tapi ada error transien — akan di-retry: %s", last_error)
+        raise ValueError(
+            "temporarily unavailable: semua strategi Facebook gagal (error transien). "
+            f"Detail terakhir: {last_error}"
+        )
 
     # Deteksi jenis konten dari URL agar pesan error tepat
     _ul = url.lower()
