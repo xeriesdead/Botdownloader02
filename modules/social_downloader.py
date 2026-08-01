@@ -723,37 +723,51 @@ def _tikwm_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     return title, sorted(files)
 
 
-def _youtube_pytubefix_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+def _youtube_pytubefix_sync(url: str, work_dir: str,
+                            client: str = "TV_EMBEDDED") -> tuple[str, list[str]]:
     """
-    Download YouTube via pytubefix — menggunakan InnerTube API langsung,
-    berbeda pendekatan dari yt-dlp sehingga sering lolos bot detection.
+    Download YouTube via pytubefix — menggunakan InnerTube API langsung.
+    Dicoba dengan TV_EMBEDDED terlebih dahulu (bypass PO token),
+    lalu fallback ke WEB_EMBEDDED jika gagal.
     """
     try:
         from pytubefix import YouTube  # type: ignore
     except ImportError as exc:
         raise ValueError("pytubefix tidak terinstall.") from exc
 
-    yt     = YouTube(url)
-    title  = yt.title or "YouTube video"
+    last_exc: Exception | None = None
+    for _client in (client, "WEB_EMBEDDED", "ANDROID"):
+        try:
+            yt = YouTube(url, client=_client, use_oauth=False, allow_oauth_cache=False)
+            title = yt.title or "YouTube video"
 
-    # Coba progressive stream (video+audio dalam 1 file) <=720p
-    stream = (
-        yt.streams
-        .filter(progressive=True, file_extension="mp4")
-        .order_by("resolution")
-        .last()
-    )
-    # Fallback: ambil stream terbaik (mungkin hanya audio atau video)
-    if not stream:
-        stream = yt.streams.get_highest_resolution()
-    if not stream:
-        raise ValueError("pytubefix: tidak ada stream yang tersedia.")
+            # Coba progressive stream (video+audio dalam 1 file) <=720p
+            stream = (
+                yt.streams
+                .filter(progressive=True, file_extension="mp4")
+                .order_by("resolution")
+                .last()
+            )
+            if not stream:
+                stream = yt.streams.get_highest_resolution()
+            if not stream:
+                raise ValueError(f"pytubefix [{_client}]: tidak ada stream yang tersedia.")
 
-    out_path = stream.download(output_path=work_dir, filename="001_video.mp4")
-    if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
-        raise ValueError("pytubefix: file kosong setelah download.")
+            out_path = stream.download(output_path=work_dir, filename=f"001_video_{_client}.mp4")
+            if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+                raise ValueError(f"pytubefix [{_client}]: file kosong setelah download.")
 
-    return title, [out_path]
+            # Rename ke nama standar
+            final_path = os.path.join(work_dir, "001_video.mp4")
+            os.replace(out_path, final_path)
+            logger.info("[social] pytubefix berhasil dengan client %s", _client)
+            return title, [final_path]
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("[social] pytubefix client %s gagal: %s", _client, exc)
+            continue
+
+    raise ValueError(f"pytubefix: semua client gagal. Terakhir: {last_exc}") from last_exc
 
 
 def _youtube_try_player(url: str, work_dir: str, player_client: str,
@@ -767,6 +781,22 @@ def _youtube_try_player(url: str, work_dir: str, player_client: str,
     extractor_args: dict = {"player_client": [player_client]}
     if skip_webpage:
         extractor_args["player_skip"] = ["webpage"]
+
+    # Header sesuai client agar terlihat seperti klien asli
+    _MOBILE_UA = (
+        "com.google.android.youtube/19.29.37 (Linux; U; Android 11) gzip"
+    )
+    _TV_UA = (
+        "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/538.1 "
+        "(KHTML, like Gecko) Version/6.0 TV Safari/538.1"
+    )
+    if player_client in ("android", "android_vr"):
+        http_headers = {"User-Agent": _MOBILE_UA}
+    elif player_client in ("tv_embedded",):
+        http_headers = {"User-Agent": _TV_UA}
+    else:
+        http_headers = {"User-Agent": _FB_UA}   # desktop browser UA
+
     options = {
         "outtmpl":                       output_template,
         "format":                        "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
@@ -781,10 +811,11 @@ def _youtube_try_player(url: str, work_dir: str, player_client: str,
         "writesubtitles":                False,
         "writeautomaticsub":             False,
         "socket_timeout":                30,
-        "retries":                       2,
-        "fragment_retries":              2,
-        "extractor_retries":             2,
+        "retries":                       3,
+        "fragment_retries":              3,
+        "extractor_retries":             3,
         "concurrent_fragment_downloads": 2,
+        "http_headers":                  http_headers,
         "extractor_args":                {"youtube": extractor_args},
     }
     with yt_dlp.YoutubeDL(options) as ydl:
@@ -804,23 +835,26 @@ def _youtube_try_player(url: str, work_dir: str, player_client: str,
 
 def _youtube_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
-    Download YouTube — multi-strategy berurutan:
-      1. pytubefix       (InnerTube API, beda pendekatan dari yt-dlp)
-      2. yt-dlp mweb     + skip_webpage
-      3. yt-dlp tv_embedded + skip_webpage
-      4. yt-dlp web_creator
-      5. yt-dlp web_safari
-      6. yt-dlp ios
-      7. yt-dlp android
+    Download YouTube — multi-strategy berurutan (urutan dari yang paling
+    andal di server, tanpa cookies):
+
+      1. yt-dlp tv_embedded          — bypass PO token; ambil visitor_data dari halaman
+      2. yt-dlp ios                  — mobile InnerTube, minim bot detection
+      3. yt-dlp android              — mobile InnerTube, alternatif ios
+      4. pytubefix (TV_EMBEDDED)     — InnerTube langsung via pytubefix
+      5. yt-dlp tv_embedded+skip     — tv_embedded tanpa fetch halaman (lebih cepat, tapi
+                                       tanpa visitor_data)
+      6. yt-dlp web_embedded         — embedded player, kadang lolos di mana web gagal
+      7. yt-dlp web_creator          — fallback terakhir yt-dlp
     """
     strategies: list[tuple[str, object]] = [
-        ("pytubefix",             lambda d: _youtube_pytubefix_sync(url, d)),
-        ("ytdlp-mweb-skip",       lambda d: _youtube_try_player(url, d, "mweb",        skip_webpage=True)),
-        ("ytdlp-tv_emb-skip",     lambda d: _youtube_try_player(url, d, "tv_embedded", skip_webpage=True)),
-        ("ytdlp-web_creator",     lambda d: _youtube_try_player(url, d, "web_creator")),
-        ("ytdlp-web_safari",      lambda d: _youtube_try_player(url, d, "web_safari")),
+        ("ytdlp-tv_emb",          lambda d: _youtube_try_player(url, d, "tv_embedded")),
         ("ytdlp-ios",             lambda d: _youtube_try_player(url, d, "ios")),
         ("ytdlp-android",         lambda d: _youtube_try_player(url, d, "android")),
+        ("pytubefix",             lambda d: _youtube_pytubefix_sync(url, d)),
+        ("ytdlp-tv_emb-skip",     lambda d: _youtube_try_player(url, d, "tv_embedded", skip_webpage=True)),
+        ("ytdlp-web_embedded",    lambda d: _youtube_try_player(url, d, "web_embedded")),
+        ("ytdlp-web_creator",     lambda d: _youtube_try_player(url, d, "web_creator")),
     ]
 
     last_error = ""
