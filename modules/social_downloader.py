@@ -22,16 +22,42 @@ def _init_yt_cookie_file() -> None:
     try:
         from config import YOUTUBE_COOKIES  # import di sini untuk hindari circular
         if not YOUTUBE_COOKIES:
+            logger.info("[social] YOUTUBE_COOKIES tidak diset — YouTube tanpa cookies")
             return
-        # Tulis ke file permanen di dalam direktori kerja (bukan /tmp yang
-        # bisa dihapus OS). File ini hanya dibaca yt-dlp, tidak dikirim kemana-mana.
+
+        # Railway (dan beberapa platform lain) menyimpan newline sebagai literal
+        # '\n' (dua karakter: backslash + n). Normalkan ke newline sungguhan agar
+        # yt-dlp bisa mem-parse format Netscape cookies.txt dengan benar.
+        content = YOUTUBE_COOKIES
+        if "\\n" in content and "\n" not in content:
+            # Semua newline di-escape → unescape
+            content = content.replace("\\n", "\n")
+            logger.info("[social] YOUTUBE_COOKIES: escaped \\n dikonversi ke newline")
+        # Normalkan juga \r\n → \n
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Pastikan header Netscape ada (yt-dlp memerlukannya)
+        if not content.lstrip().startswith("# Netscape"):
+            content = "# Netscape HTTP Cookie File\n" + content
+
+        # Tulis ke file permanen di dalam direktori kerja
         cookie_dir = os.path.join(os.path.dirname(__file__), "..", "downloads")
         os.makedirs(cookie_dir, exist_ok=True)
         cookie_path = os.path.join(cookie_dir, ".yt_cookies.txt")
         with open(cookie_path, "w", encoding="utf-8") as f:
-            f.write(YOUTUBE_COOKIES)
+            f.write(content)
+
+        # Validasi dasar: hitung baris non-komentar
+        data_lines = [l for l in content.splitlines() if l.strip() and not l.startswith("#")]
+        logger.info(
+            "[social] YouTube cookies ditulis ke %s (%d baris data)",
+            cookie_path, len(data_lines),
+        )
+        if not data_lines:
+            logger.warning("[social] YOUTUBE_COOKIES tidak mengandung data cookie — periksa format!")
+            return
+
         _YT_COOKIE_FILE = cookie_path
-        logger.info("[social] YouTube cookies dimuat dari env YOUTUBE_COOKIES")
     except Exception as exc:
         logger.warning("[social] Gagal inisialisasi YouTube cookies: %s", exc)
 
@@ -899,19 +925,26 @@ def _youtube_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         ("ytdlp-web_creator",  lambda d: _youtube_try_player(url, d, "web_creator")),
     ]
 
-    last_error = ""
+    cookie_status = f"cookie={'ada' if _YT_COOKIE_FILE and os.path.isfile(_YT_COOKIE_FILE) else 'tidak ada'}"
+    logger.info("[social] YouTube mulai download: %s (%s, %d strategi)", url, cookie_status, len(strategies))
+
+    errors: list[str] = []
     for name, fn in strategies:
         sub_dir = os.path.join(work_dir, name)
         os.makedirs(sub_dir, exist_ok=True)
         try:
-            logger.info("[social] YouTube: mencoba strategi %s: %s", name, url)
+            logger.info("[social] YouTube: mencoba strategi %s", name)
             title, files = fn(sub_dir)
             if files:
-                logger.info("[social] YouTube: berhasil dengan strategi %s (%d file)", name, len(files))
+                logger.info("[social] YouTube: BERHASIL dengan strategi %s (%d file)", name, len(files))
                 return title, files
         except Exception as exc:
-            last_error = str(exc)
-            logger.warning("[social] YouTube: strategi %s gagal: %s", name, exc)
+            err_short = str(exc)[:200]
+            errors.append(f"[{name}] {err_short}")
+            logger.warning("[social] YouTube: strategi %s GAGAL: %s", name, err_short)
+
+    # Log semua error agar bisa didiagnosa dari Railway logs
+    logger.error("[social] YouTube: semua strategi gagal. Errors:\n%s", "\n".join(errors))
 
     raise ValueError(
         "❌ Gagal mendownload video YouTube.\n"
