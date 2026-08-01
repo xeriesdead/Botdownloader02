@@ -865,37 +865,38 @@ def _youtube_try_player(url: str, work_dir: str, player_client: str,
 
 def _youtube_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
-    Download YouTube — multi-strategy berurutan (urutan dari yang paling
-    andal di server, tanpa cookies):
+    Download YouTube — multi-strategy berurutan:
 
-      1. yt-dlp tv_embedded          — bypass PO token; ambil visitor_data dari halaman
-      2. yt-dlp ios                  — mobile InnerTube, minim bot detection
-      3. yt-dlp android              — mobile InnerTube, alternatif ios
-      4. pytubefix (TV_EMBEDDED)     — InnerTube langsung via pytubefix
-      5. yt-dlp tv_embedded+skip     — tv_embedded tanpa fetch halaman (lebih cepat, tapi
-                                       tanpa visitor_data)
-      6. yt-dlp web_embedded         — embedded player, kadang lolos di mana web gagal
-      7. yt-dlp web_creator          — fallback terakhir yt-dlp
+      1. cobalt.tools API    — server sendiri, tidak kena blok IP Railway
+      2. yt-dlp web+cookies  — jika YOUTUBE_COOKIES diset (paling reliable)
+      3. yt-dlp tv_embedded  — bypass PO token via visitor_data dari halaman
+      4. yt-dlp ios          — mobile InnerTube, minim bot detection
+      5. yt-dlp android      — mobile InnerTube, alternatif ios
+      6. pytubefix           — InnerTube langsung (TV_EMBEDDED → WEB_EMBEDDED → ANDROID)
+      7. yt-dlp tv_embedded+skip
+      8. yt-dlp web_embedded
+      9. yt-dlp web_creator
     """
-    strategies: list[tuple[str, object]] = []
+    strategies: list[tuple[str, object]] = [
+        # Cobalt: server independen, tidak terpengaruh IP block YouTube di Railway
+        ("cobalt",            lambda d: _cobalt_download_sync(url, d)),
+    ]
 
     # Jika cookies tersedia: tambahkan strategi web (paling kompatibel) di awal.
-    # Cookies membuat server terlihat seperti browser yang sudah login, sehingga
-    # semua client — termasuk web biasa — bekerja tanpa PO token workaround.
     if _YT_COOKIE_FILE and os.path.isfile(_YT_COOKIE_FILE):
         strategies += [
-            ("ytdlp-web-cookies",     lambda d: _youtube_try_player(url, d, "web")),
-            ("ytdlp-ios-cookies",     lambda d: _youtube_try_player(url, d, "ios")),
+            ("ytdlp-web-cookies", lambda d: _youtube_try_player(url, d, "web")),
+            ("ytdlp-ios-cookies", lambda d: _youtube_try_player(url, d, "ios")),
         ]
 
     strategies += [
-        ("ytdlp-tv_emb",          lambda d: _youtube_try_player(url, d, "tv_embedded")),
-        ("ytdlp-ios",             lambda d: _youtube_try_player(url, d, "ios")),
-        ("ytdlp-android",         lambda d: _youtube_try_player(url, d, "android")),
-        ("pytubefix",             lambda d: _youtube_pytubefix_sync(url, d)),
-        ("ytdlp-tv_emb-skip",     lambda d: _youtube_try_player(url, d, "tv_embedded", skip_webpage=True)),
-        ("ytdlp-web_embedded",    lambda d: _youtube_try_player(url, d, "web_embedded")),
-        ("ytdlp-web_creator",     lambda d: _youtube_try_player(url, d, "web_creator")),
+        ("ytdlp-tv_emb",       lambda d: _youtube_try_player(url, d, "tv_embedded")),
+        ("ytdlp-ios",          lambda d: _youtube_try_player(url, d, "ios")),
+        ("ytdlp-android",      lambda d: _youtube_try_player(url, d, "android")),
+        ("pytubefix",          lambda d: _youtube_pytubefix_sync(url, d)),
+        ("ytdlp-tv_emb-skip",  lambda d: _youtube_try_player(url, d, "tv_embedded", skip_webpage=True)),
+        ("ytdlp-web_embedded", lambda d: _youtube_try_player(url, d, "web_embedded")),
+        ("ytdlp-web_creator",  lambda d: _youtube_try_player(url, d, "web_creator")),
     ]
 
     last_error = ""
