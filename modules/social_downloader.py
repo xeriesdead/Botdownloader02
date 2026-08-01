@@ -12,6 +12,31 @@ import yt_dlp
 
 from logger import logger
 
+# ── YouTube cookies helper ────────────────────────────────────────────────────
+# Jika env YOUTUBE_COOKIES diset (Netscape cookies.txt format), tulis ke file
+# sementara sekali saat modul di-import agar yt-dlp bisa menggunakannya.
+_YT_COOKIE_FILE: str | None = None
+
+def _init_yt_cookie_file() -> None:
+    global _YT_COOKIE_FILE
+    try:
+        from config import YOUTUBE_COOKIES  # import di sini untuk hindari circular
+        if not YOUTUBE_COOKIES:
+            return
+        # Tulis ke file permanen di dalam direktori kerja (bukan /tmp yang
+        # bisa dihapus OS). File ini hanya dibaca yt-dlp, tidak dikirim kemana-mana.
+        cookie_dir = os.path.join(os.path.dirname(__file__), "..", "downloads")
+        os.makedirs(cookie_dir, exist_ok=True)
+        cookie_path = os.path.join(cookie_dir, ".yt_cookies.txt")
+        with open(cookie_path, "w", encoding="utf-8") as f:
+            f.write(YOUTUBE_COOKIES)
+        _YT_COOKIE_FILE = cookie_path
+        logger.info("[social] YouTube cookies dimuat dari env YOUTUBE_COOKIES")
+    except Exception as exc:
+        logger.warning("[social] Gagal inisialisasi YouTube cookies: %s", exc)
+
+_init_yt_cookie_file()
+
 
 SOCIAL_DOMAINS = {
     "youtube.com",
@@ -738,7 +763,10 @@ def _youtube_pytubefix_sync(url: str, work_dir: str,
     last_exc: Exception | None = None
     for _client in (client, "WEB_EMBEDDED", "ANDROID"):
         try:
-            yt = YouTube(url, client=_client, use_oauth=False, allow_oauth_cache=False)
+            kwargs: dict = {"client": _client, "use_oauth": False, "allow_oauth_cache": False}
+            if _YT_COOKIE_FILE and os.path.isfile(_YT_COOKIE_FILE):
+                kwargs["use_oauth"] = False   # cookies sudah cukup
+            yt = YouTube(url, **kwargs)
             title = yt.title or "YouTube video"
 
             # Coba progressive stream (video+audio dalam 1 file) <=720p
@@ -818,6 +846,8 @@ def _youtube_try_player(url: str, work_dir: str, player_client: str,
         "http_headers":                  http_headers,
         "extractor_args":                {"youtube": extractor_args},
     }
+    if _YT_COOKIE_FILE and os.path.isfile(_YT_COOKIE_FILE):
+        options["cookiefile"] = _YT_COOKIE_FILE
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=True)
 
@@ -847,7 +877,18 @@ def _youtube_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
       6. yt-dlp web_embedded         — embedded player, kadang lolos di mana web gagal
       7. yt-dlp web_creator          — fallback terakhir yt-dlp
     """
-    strategies: list[tuple[str, object]] = [
+    strategies: list[tuple[str, object]] = []
+
+    # Jika cookies tersedia: tambahkan strategi web (paling kompatibel) di awal.
+    # Cookies membuat server terlihat seperti browser yang sudah login, sehingga
+    # semua client — termasuk web biasa — bekerja tanpa PO token workaround.
+    if _YT_COOKIE_FILE and os.path.isfile(_YT_COOKIE_FILE):
+        strategies += [
+            ("ytdlp-web-cookies",     lambda d: _youtube_try_player(url, d, "web")),
+            ("ytdlp-ios-cookies",     lambda d: _youtube_try_player(url, d, "ios")),
+        ]
+
+    strategies += [
         ("ytdlp-tv_emb",          lambda d: _youtube_try_player(url, d, "tv_embedded")),
         ("ytdlp-ios",             lambda d: _youtube_try_player(url, d, "ios")),
         ("ytdlp-android",         lambda d: _youtube_try_player(url, d, "android")),

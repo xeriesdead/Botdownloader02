@@ -38,3 +38,10 @@ MAX_FILE_SIZE_BYTES_PREMIUM: int = MAX_FILE_SIZE_MB_PREMIUM * 1024 * 1024
 
 # Sisa quota yang memicu notifikasi (default 2)
 QUOTA_WARN_THRESHOLD: int = int(os.getenv("QUOTA_WARN_THRESHOLD", "2"))
+
+# Cookies YouTube (Netscape format, opsional).
+# Jika diset, yt-dlp akan menggunakannya untuk bypass bot detection.
+# Cara mendapatkan: export cookies dari browser saat login YouTube
+# menggunakan ekstensi "Get cookies.txt LOCALLY", lalu paste isinya
+# ke Railway variable YOUTUBE_COOKIES.
+YOUTUBE_COOKIES: str | None = os.getenv("YOUTUBE_COOKIES") or None

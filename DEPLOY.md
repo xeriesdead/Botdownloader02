@@ -36,7 +36,37 @@ Siapkan nilai-nilai berikut (jangan commit ke git):
 | `TASKS_SECRET` | ya | String acak lain, header rahasia untuk endpoint `/tasks/*` |
 | `ADMIN_IDS` | opsional | ID Telegram admin, pisahkan koma |
 | `REQUIRED_CHANNEL` | opsional | Channel wajib join |
+| `YOUTUBE_COOKIES` | opsional | Isi file cookies.txt YouTube (Netscape format) — diperlukan jika IP server di-block YouTube. Lihat petunjuk di bawah. |
 | `MAX_FILE_SIZE_MB`, `MAX_FILE_SIZE_MB_PREMIUM`, `QUOTA_WARN_THRESHOLD` | opsional | Sudah ada default di `config.py` |
+
+### Cara mendapatkan YOUTUBE_COOKIES
+
+YouTube memblokir download otomatis dari IP server (bot detection). Solusinya
+adalah menggunakan cookies dari browser yang sudah login YouTube.
+
+1. **Install ekstensi** "Get cookies.txt LOCALLY" di Chrome/Firefox
+   - Chrome: https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc
+   - Firefox: https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/
+
+2. **Buka** https://www.youtube.com di browser dan pastikan sudah **login**.
+
+3. **Klik ikon ekstensi** → pilih **"Export"** → pilih **"youtube.com"** → simpan sebagai `cookies.txt`.
+
+4. **Buka file `cookies.txt`** dengan text editor, **copy seluruh isinya**.
+
+5. **Di Railway**, tambahkan variable baru:
+   - Key: `YOUTUBE_COOKIES`
+   - Value: paste seluruh isi cookies.txt
+
+   > ⚠️ **Penting:** Cookies mengandung token login akun YouTube kamu. Jangan
+   > bagikan ke orang lain dan jangan commit ke GitHub. Railway menyimpannya
+   > sebagai encrypted secret.
+
+6. Railway akan redeploy otomatis. Bot sekarang menggunakan cookiesmu untuk
+   download YouTube seolah-olah request datang dari browsermu.
+
+> **Catatan:** Cookies biasanya expire dalam beberapa bulan atau saat kamu
+> logout. Jika YouTube download mulai gagal lagi, ulangi langkah di atas.
 
 ## 2. Build & deploy image
 
