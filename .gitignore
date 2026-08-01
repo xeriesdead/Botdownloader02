@@ -1,0 +1,14 @@
+# Screenshot & aset yang dikirim lewat Replit — jangan di-push ke GitHub
+attached_assets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Download & log sementara
+downloads/
+logs/
+
+# Environment
+.env
