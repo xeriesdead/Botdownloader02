@@ -548,10 +548,12 @@ def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         raise ValueError("❌ Gagal menghubungi layanan download. Coba lagi nanti.") from _cobalt_last_exc
 
     status = data.get("status")
-    logger.info("[social] cobalt status=%s url=%s", status, url)
+    logger.info("[social] cobalt status=%s data=%s url=%s", status, _json.dumps(data)[:300], url)
 
     if status == "error":
         code = (data.get("error") or {}).get("code", "unknown")
+        ctx  = (data.get("error") or {}).get("context", {})
+        logger.warning("[social] cobalt error code=%s ctx=%s", code, ctx)
         raise ValueError(
             "❌ Gagal mendownload.\n"
             "Pastikan link masih aktif dan bersifat publik.\n"
@@ -560,6 +562,10 @@ def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
 
     if status == "rate-limit":
         raise ValueError("❌ Layanan download sedang rate-limited. Coba lagi nanti.")
+
+    if status not in ("tunnel", "stream", "redirect", "picker"):
+        logger.warning("[social] cobalt status tidak dikenal: %s — full response: %s", status, data)
+        raise ValueError(f"cobalt: status tidak dikenal '{status}'")
 
     def _dl(dl_url: str, dest: str) -> str:
         """Download file ke dest, kembalikan Content-Type dari response."""

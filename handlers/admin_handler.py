@@ -557,6 +557,80 @@ def setup(app):
 
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
+    # ── /testyt <url> — debug YouTube download (admin only) ──────────────
+    @admin_only
+    async def test_yt(update, context):
+        """
+        Coba download URL YouTube dan kirim hasilnya ke admin.
+        Gunakan untuk debug ketika YouTube gagal di-download user biasa.
+        Contoh: /testyt https://youtu.be/xxxxx
+        """
+        import shutil, tempfile, os
+        from modules.social_downloader import _cobalt_download_sync, _youtube_download_sync
+        from modules.social_downloader import _YT_COOKIE_FILE
+
+        url = (context.args or ["https://youtu.be/dQw4w9WgXcQ"])[0].strip()
+        msg = await update.message.reply_text(
+            f"🔍 Mencoba download YouTube:\n<code>{url}</code>\n\nMohon tunggu...",
+            parse_mode=ParseMode.HTML,
+        )
+
+        results: list[str] = []
+
+        # ── 1. Info cookies ───────────────────────────────────────────────
+        if _YT_COOKIE_FILE and os.path.isfile(_YT_COOKIE_FILE):
+            with open(_YT_COOKIE_FILE) as f:
+                lines = [l for l in f if l.strip() and not l.startswith("#")]
+            results.append(f"🍪 Cookies: <b>{len(lines)} baris</b> (tersedia)")
+        else:
+            results.append("🍪 Cookies: <b>tidak ada</b>")
+
+        # ── 2. Test cobalt langsung ───────────────────────────────────────
+        import urllib.request, json as _json
+        cobalt_api = "https://api.cobalt.tools/"
+        cobalt_ua  = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
+        try:
+            body = _json.dumps({"url": url}).encode()
+            req  = urllib.request.Request(
+                cobalt_api, data=body, method="POST",
+                headers={"Accept": "application/json",
+                         "Content-Type": "application/json",
+                         "User-Agent": cobalt_ua},
+            )
+            with urllib.request.urlopen(req, timeout=20) as r:
+                resp_data = _json.loads(r.read())
+            status = resp_data.get("status", "?")
+            results.append(f"🌐 Cobalt API: status=<code>{status}</code>")
+            if status == "error":
+                code = (resp_data.get("error") or {}).get("code", "?")
+                results.append(f"   ↳ error code: <code>{code}</code>")
+            elif status in ("tunnel", "stream", "redirect"):
+                dl_url = resp_data.get("url", "")
+                results.append(f"   ↳ url: <code>{dl_url[:80]}</code>")
+        except Exception as exc:
+            results.append(f"🌐 Cobalt API: <b>GAGAL</b> — {exc}")
+
+        # ── 3. Full YouTube download test ─────────────────────────────────
+        work_dir = tempfile.mkdtemp(prefix="testyt_")
+        try:
+            title, files = await asyncio.to_thread(_youtube_download_sync, url, work_dir)
+            sizes = [f"{os.path.getsize(f)//1024} KB" for f in files]
+            results.append(f"✅ Download berhasil: {title}")
+            results.append(f"   File: {', '.join(sizes)}")
+        except Exception as exc:
+            results.append(f"❌ Download gagal: <code>{str(exc)[:300]}</code>")
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+        await msg.edit_text(
+            "🔍 <b>Hasil test YouTube:</b>\n\n" + "\n".join(results),
+            parse_mode=ParseMode.HTML,
+        )
+
     app.add_handler(CommandHandler("activity",        activity))
     app.add_handler(CommandHandler("recentactivity",  recent_activity))
     app.add_handler(CommandHandler("topdownloaders",  top_downloaders))
@@ -571,3 +645,4 @@ def setup(app):
     app.add_handler(CommandHandler("ban",           ban_user))
     app.add_handler(CommandHandler("unban",         unban_user))
     app.add_handler(CommandHandler("broadcast",     broadcast))
+    app.add_handler(CommandHandler("testyt",        test_yt))
