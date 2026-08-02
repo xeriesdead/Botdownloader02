@@ -6,14 +6,15 @@ Commands:
   /imagine   — generate an image from a text prompt (Flux Schnell)
 """
 
-import io
 import asyncio
+import traceback
 
 import replicate
 from telegram.ext import CommandHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 
 from modules.channel_guard import require_member
+from config import BOT_TOKEN, REPLICATE_API_TOKEN
 from logger import logger
 
 # ---------------------------------------------------------------------------
@@ -31,19 +32,22 @@ _IMAGINE_MODEL  = "black-forest-labs/flux-schnell"
 # Helpers
 # ---------------------------------------------------------------------------
 
-async def _download_tg_file(bot, file_id: str) -> io.BytesIO:
-    """Download a Telegram file and return it as a BytesIO object."""
+async def _get_tg_file_url(bot, file_id: str) -> str:
+    """Return the direct HTTPS URL of a Telegram file (accessible from Replicate)."""
     tg_file = await bot.get_file(file_id)
-    data = await tg_file.download_as_bytearray()
-    buf = io.BytesIO(bytes(data))
-    buf.name = "image.jpg"
-    return buf
+    # tg_file.file_path is the path after /file/bot<token>/
+    return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{tg_file.file_path}"
+
+
+def _check_token() -> bool:
+    """Return True if REPLICATE_API_TOKEN is set in the environment."""
+    return bool(REPLICATE_API_TOKEN)
 
 
 def _to_url(output) -> str:
     """
     Normalise Replicate output to a string URL.
-    Handles both plain strings and replicate.helpers.FileOutput objects.
+    Handles plain strings, FileOutput objects, and lists.
     """
     if isinstance(output, list):
         output = output[0]
@@ -56,6 +60,16 @@ def _to_url(output) -> str:
 
 async def _faceswap_cmd(update, context):
     if not await require_member(context.bot, update):
+        return
+
+    if not _check_token():
+        await update.message.reply_text(
+            "❌ Fitur AI belum aktif.\n"
+            "Tambahkan <code>REPLICATE_API_TOKEN</code> ke Railway Variables "
+            "(<a href='https://replicate.com'>replicate.com</a> → gratis).",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
         return
 
     uid = update.effective_user.id
@@ -87,6 +101,16 @@ async def _imagine_cmd(update, context):
     if not await require_member(context.bot, update):
         return
 
+    if not _check_token():
+        await update.message.reply_text(
+            "❌ Fitur AI belum aktif.\n"
+            "Tambahkan <code>REPLICATE_API_TOKEN</code> ke Railway Variables "
+            "(<a href='https://replicate.com'>replicate.com</a> → gratis).",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        return
+
     prompt = " ".join(context.args).strip()
     if not prompt:
         await update.message.reply_text(
@@ -109,6 +133,7 @@ async def _imagine_cmd(update, context):
             },
         )
         image_url = _to_url(output)
+        logger.info(f"imagine output url: {image_url}")
 
         await update.message.reply_photo(
             photo=image_url,
@@ -117,26 +142,17 @@ async def _imagine_cmd(update, context):
         )
         await msg.delete()
 
-    except replicate.exceptions.ReplicateError as e:
-        logger.error(f"imagine replicate error: {e}")
+    except Exception as e:
+        logger.error(f"imagine error: {e}\n{traceback.format_exc()}")
         await msg.edit_text(
-            "❌ Gagal membuat gambar — pastikan <code>REPLICATE_API_TOKEN</code> sudah diset.",
+            f"❌ Gagal membuat gambar.\n<code>{type(e).__name__}: {e}</code>",
             parse_mode=ParseMode.HTML,
         )
-    except Exception as e:
-        logger.error(f"imagine error: {e}")
-        await msg.edit_text("❌ Terjadi kesalahan. Coba lagi nanti.")
 
 
 # ---------------------------------------------------------------------------
 # Photo message handler (handles the 2-step face-swap flow)
 # ---------------------------------------------------------------------------
-
-def _user_in_faceswap(update, _context) -> bool:
-    """Custom filter: only fire if this user has an active face-swap session."""
-    uid = update.effective_user.id if update.effective_user else None
-    return uid is not None and uid in _faceswap_state
-
 
 async def _photo_handler(update, context):
     uid = update.effective_user.id
@@ -168,19 +184,22 @@ async def _photo_handler(update, context):
         msg = await update.message.reply_text("⏳ Memproses face swap, harap tunggu…")
 
         try:
-            target_buf, source_buf = await asyncio.gather(
-                _download_tg_file(context.bot, target_file_id),
-                _download_tg_file(context.bot, photo.file_id),
+            # Get direct HTTPS URLs — more reliable than uploading bytes
+            target_url, source_url = await asyncio.gather(
+                _get_tg_file_url(context.bot, target_file_id),
+                _get_tg_file_url(context.bot, photo.file_id),
             )
+            logger.info(f"faceswap target_url={target_url} source_url={source_url}")
 
             output = await replicate.async_run(
                 _FACESWAP_MODEL,
                 input={
-                    "target_image": target_buf,
-                    "swap_image":   source_buf,
+                    "target_image": target_url,
+                    "swap_image":   source_url,
                 },
             )
             image_url = _to_url(output)
+            logger.info(f"faceswap output url: {image_url}")
 
             await update.message.reply_photo(
                 photo=image_url,
@@ -189,15 +208,12 @@ async def _photo_handler(update, context):
             )
             await msg.delete()
 
-        except replicate.exceptions.ReplicateError as e:
-            logger.error(f"faceswap replicate error: {e}")
+        except Exception as e:
+            logger.error(f"faceswap error: {e}\n{traceback.format_exc()}")
             await msg.edit_text(
-                "❌ Gagal melakukan face swap — pastikan <code>REPLICATE_API_TOKEN</code> sudah diset.",
+                f"❌ Gagal melakukan face swap.\n<code>{type(e).__name__}: {e}</code>",
                 parse_mode=ParseMode.HTML,
             )
-        except Exception as e:
-            logger.error(f"faceswap error: {e}")
-            await msg.edit_text("❌ Terjadi kesalahan. Coba lagi nanti.")
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +225,7 @@ def setup(app):
     app.add_handler(CommandHandler("cancelfaceswap", _cancel_faceswap_cmd))
     app.add_handler(CommandHandler("imagine",         _imagine_cmd))
 
-    # group=1 so it runs after group=0 handlers; only fires for users in state
+    # group=1 so it runs after group=0 handlers
     app.add_handler(
         MessageHandler(
             filters.PHOTO & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE,
