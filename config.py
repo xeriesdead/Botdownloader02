@@ -45,3 +45,15 @@ QUOTA_WARN_THRESHOLD: int = int(os.getenv("QUOTA_WARN_THRESHOLD", "2"))
 # menggunakan ekstensi "Get cookies.txt LOCALLY", lalu paste isinya
 # ke Railway variable YOUTUBE_COOKIES.
 YOUTUBE_COOKIES: str | None = os.getenv("YOUTUBE_COOKIES") or None
+
+# Proxy untuk yt-dlp (opsional).
+# Format: socks5://user:pass@host:port  atau  http://host:port
+# Gunakan ini jika YouTube memblokir IP Railway secara langsung.
+# Contoh proxy SOCKS5 gratis (cari di https://proxyscrape.com):
+#   YTDL_PROXY=socks5://1.2.3.4:1080
+YTDL_PROXY: str | None = os.getenv("YTDL_PROXY") or None
+
+# Cobalt API key (opsional).
+# api.cobalt.tools sekarang memerlukan API key untuk akses publik.
+# Daftar di https://cobalt.tools dan dapatkan key-nya.
+COBALT_API_KEY: str | None = os.getenv("COBALT_API_KEY") or None

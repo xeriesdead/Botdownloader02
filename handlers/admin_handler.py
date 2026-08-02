@@ -566,8 +566,10 @@ def setup(app):
         Contoh: /testyt https://youtu.be/xxxxx
         """
         import shutil, tempfile, os
-        from modules.social_downloader import _cobalt_download_sync, _youtube_download_sync
-        from modules.social_downloader import _YT_COOKIE_FILE
+        from modules.social_downloader import (
+            _youtube_download_sync, _cobalt_request,
+            _YT_COOKIE_FILE, _YTDL_PROXY, _COBALT_INSTANCES, _COBALT_API_KEY,
+        )
 
         url = (context.args or ["https://youtu.be/dQw4w9WgXcQ"])[0].strip()
         msg = await update.message.reply_text(
@@ -577,49 +579,47 @@ def setup(app):
 
         results: list[str] = []
 
-        # ── 1. Info cookies ───────────────────────────────────────────────
+        # ── 1. Status konfigurasi ─────────────────────────────────────────
         if _YT_COOKIE_FILE and os.path.isfile(_YT_COOKIE_FILE):
             with open(_YT_COOKIE_FILE) as f:
-                lines = [l for l in f if l.strip() and not l.startswith("#")]
-            results.append(f"🍪 Cookies: <b>{len(lines)} baris</b> (tersedia)")
+                cookie_lines = [l for l in f if l.strip() and not l.startswith("#")]
+            results.append(f"🍪 Cookies: <b>{len(cookie_lines)} baris</b>")
         else:
             results.append("🍪 Cookies: <b>tidak ada</b>")
 
-        # ── 2. Test cobalt langsung ───────────────────────────────────────
-        import urllib.request, json as _json
-        cobalt_api = "https://api.cobalt.tools/"
-        cobalt_ua  = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
+        results.append(
+            f"🔑 Cobalt API Key: <b>{'ada' if _COBALT_API_KEY else 'tidak ada'}</b>"
         )
-        try:
-            body = _json.dumps({"url": url}).encode()
-            req  = urllib.request.Request(
-                cobalt_api, data=body, method="POST",
-                headers={"Accept": "application/json",
-                         "Content-Type": "application/json",
-                         "User-Agent": cobalt_ua},
-            )
-            with urllib.request.urlopen(req, timeout=20) as r:
-                resp_data = _json.loads(r.read())
-            status = resp_data.get("status", "?")
-            results.append(f"🌐 Cobalt API: status=<code>{status}</code>")
-            if status == "error":
-                code = (resp_data.get("error") or {}).get("code", "?")
-                results.append(f"   ↳ error code: <code>{code}</code>")
-            elif status in ("tunnel", "stream", "redirect"):
-                dl_url = resp_data.get("url", "")
-                results.append(f"   ↳ url: <code>{dl_url[:80]}</code>")
-        except Exception as exc:
-            results.append(f"🌐 Cobalt API: <b>GAGAL</b> — {exc}")
+        results.append(
+            f"🌐 Proxy: <b>{_YTDL_PROXY or 'tidak ada'}</b>"
+        )
+
+        # ── 2. Test setiap cobalt instance ───────────────────────────────
+        for instance in _COBALT_INSTANCES:
+            try:
+                resp_data = await asyncio.to_thread(_cobalt_request, instance, url)
+                status    = resp_data.get("status", "?")
+                extra     = ""
+                if status == "error":
+                    code  = (resp_data.get("error") or {}).get("code", "?")
+                    extra = f" → error: <code>{code}</code>"
+                elif status in ("tunnel", "stream", "redirect"):
+                    dl_url = resp_data.get("url", "")
+                    extra  = f" → url: <code>{dl_url[:60]}</code>"
+                results.append(f"✅ Cobalt <code>{instance}</code> — <b>{status}</b>{extra}")
+            except Exception as exc:
+                results.append(
+                    f"❌ Cobalt <code>{instance}</code> — <b>GAGAL</b>: "
+                    f"<code>{str(exc)[:150]}</code>"
+                )
 
         # ── 3. Full YouTube download test ─────────────────────────────────
+        results.append("\n⏳ Mencoba full download...")
         work_dir = tempfile.mkdtemp(prefix="testyt_")
         try:
             title, files = await asyncio.to_thread(_youtube_download_sync, url, work_dir)
             sizes = [f"{os.path.getsize(f)//1024} KB" for f in files]
-            results.append(f"✅ Download berhasil: {title}")
+            results.append(f"✅ Download berhasil: <b>{title}</b>")
             results.append(f"   File: {', '.join(sizes)}")
         except Exception as exc:
             results.append(f"❌ Download gagal: <code>{str(exc)[:300]}</code>")

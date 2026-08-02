@@ -83,12 +83,41 @@ SOCIAL_DOMAINS = {
 _FACEBOOK_DOMAINS = {"facebook.com", "fb.watch", "fb.com"}
 # Threads: pakai cobalt API
 _THREADS_DOMAINS  = {"threads.net", "threads.com"}
-_COBALT_API       = "https://api.cobalt.tools/"
+
+# Cobalt instances yang akan dicoba secara berurutan
+# Instance pertama = prioritas utama; berikutnya = fallback
+_COBALT_INSTANCES = [
+    "https://api.cobalt.tools/",
+    "https://cobalt.api.t.me/",       # Telegram-hosted instance
+    "https://co.wuk.sh/",             # alternatif community instance
+]
 _COBALT_UA        = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+# Proxy untuk yt-dlp (dari env YTDL_PROXY)
+_YTDL_PROXY: str | None = None
+# Cobalt API key (dari env COBALT_API_KEY)
+_COBALT_API_KEY: str | None = None
+
+def _init_ytdl_proxy() -> None:
+    global _YTDL_PROXY, _COBALT_API_KEY
+    try:
+        from config import YTDL_PROXY, COBALT_API_KEY
+        _YTDL_PROXY = YTDL_PROXY
+        _COBALT_API_KEY = COBALT_API_KEY
+        if _YTDL_PROXY:
+            logger.info("[social] YTDL_PROXY diset: %s", _YTDL_PROXY)
+        else:
+            logger.info("[social] YTDL_PROXY tidak diset — yt-dlp tanpa proxy")
+        if _COBALT_API_KEY:
+            logger.info("[social] COBALT_API_KEY diset")
+    except Exception as exc:
+        logger.warning("[social] Gagal inisialisasi proxy/cobalt config: %s", exc)
+
+_init_ytdl_proxy()
 _FB_UA            = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -502,50 +531,77 @@ def _facebook_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     )
 
 
-def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+def _cobalt_request(api_url: str, url: str) -> dict:
     """
-    Download via cobalt.tools API — tanpa auth, mendukung Threads.
-    Returns (title, list_of_file_paths).
+    Kirim satu request ke satu cobalt instance.
+    Raise ValueError jika gagal (HTTP error, network error, dsb).
     """
-    body = _json.dumps({"url": url}).encode()
-    req  = urllib.request.Request(
-        _COBALT_API,
-        data=body,
-        headers={
-            "Accept":       "application/json",
-            "Content-Type": "application/json",
-            "User-Agent":   _COBALT_UA,
-        },
-        method="POST",
-    )
-    # Retry hingga 2x untuk error transien (429, 5xx, network blip)
-    _cobalt_last_exc: Exception | None = None
+    import time as _time
+    body = _json.dumps({"url": url, "videoQuality": "max", "filenameStyle": "basic"}).encode()
+    headers: dict = {
+        "Accept":       "application/json",
+        "Content-Type": "application/json",
+        "User-Agent":   _COBALT_UA,
+    }
+    if _COBALT_API_KEY:
+        headers["X-Cobalt-API-Key"] = _COBALT_API_KEY
+
+    last_exc: Exception | None = None
     for _attempt in range(3):
         try:
+            req  = urllib.request.Request(api_url, data=body, headers=headers, method="POST")
             resp = urllib.request.urlopen(req, timeout=30)
-            data = _json.loads(resp.read())
-            _cobalt_last_exc = None
-            break
+            return _json.loads(resp.read())
         except urllib.error.HTTPError as exc:
-            _cobalt_last_exc = exc
+            # Baca body error untuk diagnosa
+            try:
+                err_body = exc.read().decode(errors="replace")[:500]
+            except Exception:
+                err_body = "(tidak bisa baca body)"
+            logger.warning(
+                "[social] cobalt %s HTTP %d: %s", api_url, exc.code, err_body
+            )
+            last_exc = exc
             if exc.code in (429, 500, 502, 503, 504) and _attempt < 2:
-                import time as _time
                 _time.sleep(3 * (_attempt + 1))
                 continue
             raise ValueError(
-                f"❌ Layanan download tidak tersedia saat ini (HTTP {exc.code}). Coba lagi nanti."
+                f"cobalt HTTP {exc.code} dari {api_url}: {err_body[:200]}"
             ) from exc
         except Exception as exc:
-            _cobalt_last_exc = exc
+            last_exc = exc
+            logger.warning("[social] cobalt %s error: %s", api_url, exc)
             if _attempt < 2:
-                import time as _time
                 _time.sleep(3)
                 continue
-            raise ValueError(
-                "❌ Gagal menghubungi layanan download. Coba lagi nanti."
-            ) from exc
-    if _cobalt_last_exc:
-        raise ValueError("❌ Gagal menghubungi layanan download. Coba lagi nanti.") from _cobalt_last_exc
+            raise ValueError(f"cobalt network error dari {api_url}: {exc}") from exc
+    raise ValueError("cobalt: semua retry gagal") from last_exc
+
+
+def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+    """
+    Download via cobalt.tools API — tanpa auth, mendukung Threads.
+    Mencoba semua instance di _COBALT_INSTANCES secara berurutan.
+    Returns (title, list_of_file_paths).
+    """
+    # Coba setiap cobalt instance hingga ada yang berhasil
+    last_exc: Exception | None = None
+    data: dict | None = None
+    for instance in _COBALT_INSTANCES:
+        try:
+            data = _cobalt_request(instance, url)
+            logger.info("[social] cobalt berhasil dari instance: %s", instance)
+            break
+        except Exception as exc:
+            logger.warning("[social] cobalt instance %s gagal: %s", instance, exc)
+            last_exc = exc
+            continue
+
+    if data is None:
+        raise ValueError(
+            "❌ Layanan download tidak tersedia saat ini. Coba lagi nanti.\n"
+            f"<i>Detail: {last_exc}</i>"
+        ) from last_exc
 
     status = data.get("status")
     logger.info("[social] cobalt status=%s data=%s url=%s", status, _json.dumps(data)[:300], url)
@@ -891,6 +947,8 @@ def _youtube_try_player(url: str, work_dir: str, player_client: str,
     }
     if _YT_COOKIE_FILE and os.path.isfile(_YT_COOKIE_FILE):
         options["cookiefile"] = _YT_COOKIE_FILE
+    if _YTDL_PROXY:
+        options["proxy"] = _YTDL_PROXY
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=True)
 
