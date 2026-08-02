@@ -24,7 +24,7 @@ from logger import logger
 _faceswap_state: dict[int, dict] = {}
 
 # Replicate model IDs
-_FACESWAP_MODEL = "lucataco/faceswap"
+_FACESWAP_MODEL = "ddvinh1/inswapper:25bdae46f2713138640b6e8c04dc4ca18625ce95b1863936b053eee42d9ba6db"
 _IMAGINE_MODEL  = "black-forest-labs/flux-schnell"
 
 
@@ -194,8 +194,8 @@ async def _photo_handler(update, context):
             output = await replicate.async_run(
                 _FACESWAP_MODEL,
                 input={
-                    "target_image": target_url,
-                    "swap_image":   source_url,
+                    "target_img": target_url,   # image to swap face INTO
+                    "source_img": source_url,   # face to use
                 },
             )
             image_url = _to_url(output)
