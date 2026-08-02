@@ -1,49 +1,40 @@
-# Overview
+# Telegram Bot
 
-Telegram bot (Python) yang mem-forward/download file dari channel Telegram
-(termasuk link Terabox), dengan sistem quota harian, referral, dan langganan
-premium. Dibangun dengan `python-telegram-bot` (sisi bot) dan
-`pyrofork`/Pyrogram (sisi user-session, untuk akses channel yang bot sendiri
-tidak bisa akses), disimpan di PostgreSQL.
+A Python Telegram bot with file forwarding, premium subscriptions, user quota management, and admin controls.
 
-## Cara menjalankan
+## Stack
+- **Runtime:** Python 3
+- **Telegram library:** `python-telegram-bot` + `pyrofork` (Pyrogram fork) + `tgcrypto`
+- **Database:** PostgreSQL via `psycopg2`
+- **Media:** `yt-dlp`, `gallery-dl`, `pytubefix`
 
-Ada dua entry point, untuk dua mode berbeda:
+## Run modes
+- **Polling** (`main.py`) — simpler, suitable for Replit
+- **Webhook** (`webhook_server.py`) — for Railway / Cloud Run (see `DEPLOY.md`)
 
-- **`main.py`** — mode polling (long-polling ke Telegram API). Proses harus
-  hidup terus-menerus. Ini adalah mode produksi yang dipakai di Railway.
-- **`webhook_server.py`** — mode webhook (serverless-ready). Menerima update
-  Telegram lewat HTTP, dan 3 loop latar belakang (`cleanup`, `daily_reset`,
-  `premium_expiry`) diganti jadi endpoint `/tasks/*` yang dipicu scheduler
-  eksternal. Dipakai lewat `Dockerfile` untuk deploy ke Google Cloud Run —
-  lihat `DEPLOY.md` untuk panduan lengkap (secrets yang dibutuhkan, cara
-  daftarkan webhook, dan cara setup Cloud Scheduler).
+## Required secrets
+| Variable | Description |
+|---|---|
+| `BOT_TOKEN` | From @BotFather |
+| `API_ID` | From https://my.telegram.org |
+| `API_HASH` | From https://my.telegram.org |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `ADMIN_IDS` | Comma-separated Telegram user IDs |
 
-Mode polling membutuhkan secrets berikut di environment: `BOT_TOKEN`, `API_ID`,
-`API_HASH`, `DATABASE_URL`. `WEBHOOK_SECRET` dan `TASKS_SECRET` tidak diperlukan
-untuk mode polling. Lihat `config.py` untuk daftar lengkap env var opsional.
+## Optional secrets
+| Variable | Default | Description |
+|---|---|---|
+| `REQUIRED_CHANNEL` | — | Username/ID of channel users must join |
+| `MAX_FILE_SIZE_MB` | 1024 | File size limit for regular users (MB) |
+| `MAX_FILE_SIZE_MB_PREMIUM` | 2048 | File size limit for premium users (MB) |
+| `QUOTA_WARN_THRESHOLD` | 2 | Remaining quota that triggers a warning |
+| `YOUTUBE_COOKIES` | — | Netscape-format cookies for yt-dlp |
+| `WEBHOOK_SECRET` | — | Webhook path secret (webhook mode only) |
+| `TASKS_SECRET` | — | Header secret for scheduled task endpoints |
 
-## Download media sosial
-
-Perintah `/get` juga menerima link publik dari YouTube, TikTok, Instagram,
-Facebook, X/Twitter, dan Threads. Video serta foto/carousel didukung tanpa
-meminta login ke akun media sosial:
-
-```text
-/get https://www.youtube.com/watch?v=...
-/get https://www.instagram.com/p/...
-```
-
-Downloader menggunakan `yt-dlp` dan `ffmpeg`. Konten private, konten yang
-memerlukan login, atau link yang sudah kedaluwarsa dapat ditolak oleh platform
-asal. Quota tetap dipotong satu kali per permintaan dan dikembalikan jika
-download gagal atau dibatalkan.
+## How to run on Replit (polling mode)
+1. Add all required secrets via Replit Secrets
+2. Install dependencies: `pip install -r requirements.txt`
+3. Run: `python main.py`
 
 ## User preferences
-
-- Bot ini dideploy ke Railway dalam mode polling always-on karena bot perlu
-  proses yang terus berjalan dan memiliki dependency native (tgcrypto,
-  pyrofork, psycopg2-binary).
-- Setiap perubahan kode harus di-commit dan di-push ke GitHub (`origin/main`)
-  agar Railway otomatis redeploy. Gunakan `gitPush({})` via git-remote skill
-  setelah setiap perubahan.
