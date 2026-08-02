@@ -84,7 +84,11 @@ _FACEBOOK_DOMAINS = {"facebook.com", "fb.watch", "fb.com"}
 # Threads: pakai cobalt API
 _THREADS_DOMAINS  = {"threads.net", "threads.com"}
 _COBALT_API       = "https://api.cobalt.tools/"
-_COBALT_UA        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+_COBALT_UA        = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 _FB_UA            = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -554,11 +558,14 @@ def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
             f"<i>Kode: {code}</i>"
         )
 
+    if status == "rate-limit":
+        raise ValueError("❌ Layanan download sedang rate-limited. Coba lagi nanti.")
+
     def _dl(dl_url: str, dest: str) -> str:
         """Download file ke dest, kembalikan Content-Type dari response."""
         req2 = urllib.request.Request(dl_url, headers={"User-Agent": _COBALT_UA})
         content_type = "application/octet-stream"
-        with urllib.request.urlopen(req2, timeout=120) as r:
+        with urllib.request.urlopen(req2, timeout=300) as r:
             content_type = r.headers.get("Content-Type", content_type)
             with open(dest, "wb") as f:
                 while True:
@@ -570,7 +577,10 @@ def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
 
     files: list[str] = []
 
-    if status in ("tunnel", "redirect"):
+    # "tunnel" dan "stream": download langsung dari URL yang diberikan cobalt.
+    # "redirect": URL final dari platform — download langsung.
+    # Ketiga status ini diperlakukan sama: ambil file dari data["url"].
+    if status in ("tunnel", "stream", "redirect"):
         dl_url = data.get("url")
         if not dl_url:
             raise ValueError("❌ Tidak ada link download yang tersedia.")
@@ -869,6 +879,7 @@ def _youtube_try_player(url: str, work_dir: str, player_client: str,
         "fragment_retries":              3,
         "extractor_retries":             3,
         "concurrent_fragment_downloads": 2,
+        "geo_bypass":                    True,
         "http_headers":                  http_headers,
         "extractor_args":                {"youtube": extractor_args},
     }
