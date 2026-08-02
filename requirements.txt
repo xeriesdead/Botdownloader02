@@ -8,4 +8,4 @@ psycopg2-binary
 yt-dlp>=2025.1.15
 gallery-dl
 pytubefix
-replicate>=0.34.0
+fal-client>=0.10.0

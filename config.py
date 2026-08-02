@@ -58,8 +58,8 @@ YTDL_PROXY: str | None = os.getenv("YTDL_PROXY") or None
 # Daftar di https://cobalt.tools dan dapatkan key-nya.
 COBALT_API_KEY: str | None = os.getenv("COBALT_API_KEY") or None
 
-# Token Replicate untuk fitur AI (Face Swap, Image Generation).
-# Daftar gratis di https://replicate.com — set di Railway/Replit Secrets.
-# Nama variabel HARUS "REPLICATE_API_TOKEN" (dibaca otomatis oleh SDK Replicate).
+# API key fal.ai untuk fitur AI (Face Swap, Image Generation).
+# Daftar gratis di https://fal.ai/dashboard/keys — set di Railway Variables.
+# Nama variabel HARUS "FAL_KEY" (dibaca otomatis oleh SDK fal-client).
 # Jika tidak diset, perintah /faceswap dan /imagine akan menampilkan pesan error.
-REPLICATE_API_TOKEN: str | None = os.getenv("REPLICATE_API_TOKEN") or None
+FAL_KEY: str | None = os.getenv("FAL_KEY") or None

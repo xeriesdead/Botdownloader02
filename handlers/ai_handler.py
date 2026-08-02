@@ -1,82 +1,113 @@
 """
-AI features handler — Face Swap & Image Generation via Replicate.
+AI features handler — Face Swap & Image Generation via fal.ai.
 
 Commands:
-  /faceswap  — 2-step photo flow: target → source face → swapped result
+  /faceswap  — multi-step flow: pick gender → target photo → source face → result
   /imagine   — generate an image from a text prompt (Flux Schnell)
+
+Env var required: FAL_KEY  (from https://fal.ai/dashboard/keys)
 """
 
 import asyncio
 import traceback
+import os
 
-import replicate
-from telegram.ext import CommandHandler, MessageHandler, filters
+import fal_client
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from telegram.constants import ParseMode
 
 from modules.channel_guard import require_member
-from config import BOT_TOKEN, REPLICATE_API_TOKEN
 from logger import logger
 
 # ---------------------------------------------------------------------------
-# In-memory state for the 2-step face-swap flow
-# uid -> {"step": "target" | "source", "target_file_id": str}
+# In-memory state for the multi-step face-swap flow
+# uid -> {"step": "target"|"source", "gender": str, "target_file_id": str}
 # ---------------------------------------------------------------------------
 _faceswap_state: dict[int, dict] = {}
 
-# Replicate model IDs
-_FACESWAP_MODEL = "ddvinh1/inswapper:25bdae46f2713138640b6e8c04dc4ca18625ce95b1863936b053eee42d9ba6db"
-_IMAGINE_MODEL  = "black-forest-labs/flux-schnell"
+# fal.ai model IDs
+_FACESWAP_MODEL = "easel-ai/advanced-face-swap"
+_IMAGINE_MODEL  = "fal-ai/flux/schnell"
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _check_fal_key() -> bool:
+    return bool(os.getenv("FAL_KEY"))
+
+
 async def _get_tg_file_url(bot, file_id: str) -> str:
-    """Return the direct HTTPS URL of a Telegram file (accessible from Replicate)."""
+    """Return direct HTTPS URL of a Telegram file (accessible from fal.ai)."""
+    from config import BOT_TOKEN
     tg_file = await bot.get_file(file_id)
-    # tg_file.file_path is the path after /file/bot<token>/
     return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{tg_file.file_path}"
 
 
-def _check_token() -> bool:
-    """Return True if REPLICATE_API_TOKEN is set in the environment."""
-    return bool(REPLICATE_API_TOKEN)
-
-
-def _to_url(output) -> str:
-    """
-    Normalise Replicate output to a string URL.
-    Handles plain strings, FileOutput objects, and lists.
-    """
-    if isinstance(output, list):
-        output = output[0]
-    return str(output)
+def _no_token_msg() -> str:
+    return (
+        "❌ Fitur AI belum aktif.\n"
+        "Tambahkan <code>FAL_KEY</code> ke Railway Variables.\n"
+        "Daftar gratis di <a href='https://fal.ai/dashboard/keys'>fal.ai/dashboard/keys</a>"
+    )
 
 
 # ---------------------------------------------------------------------------
-# /faceswap
+# /faceswap — Step 0: ask gender via inline keyboard
 # ---------------------------------------------------------------------------
 
 async def _faceswap_cmd(update, context):
     if not await require_member(context.bot, update):
         return
 
-    if not _check_token():
+    if not _check_fal_key():
         await update.message.reply_text(
-            "❌ Fitur AI belum aktif.\n"
-            "Tambahkan <code>REPLICATE_API_TOKEN</code> ke Railway Variables "
-            "(<a href='https://replicate.com'>replicate.com</a> → gratis).",
+            _no_token_msg(),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
         return
 
-    uid = update.effective_user.id
-    _faceswap_state[uid] = {"step": "target"}
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👨 Pria",    callback_data="fs_gender_male"),
+            InlineKeyboardButton("👩 Wanita",  callback_data="fs_gender_female"),
+            InlineKeyboardButton("🧑 Lainnya", callback_data="fs_gender_non-binary"),
+        ],
+        [InlineKeyboardButton("❌ Batal", callback_data="fs_cancel")],
+    ])
 
     await update.message.reply_text(
         "🔄 <b>Face Swap</b>\n\n"
+        "Pilih gender dari wajah yang akan kamu pakai:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Callback: gender selected (or cancel)
+# ---------------------------------------------------------------------------
+
+async def _faceswap_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    if query.data == "fs_cancel":
+        _faceswap_state.pop(uid, None)
+        await query.edit_message_text("❌ Face swap dibatalkan.")
+        return
+
+    # data format: "fs_gender_<value>"
+    gender = query.data[len("fs_gender_"):]
+    _faceswap_state[uid] = {"step": "target", "gender": gender}
+
+    gender_label = {"male": "👨 Pria", "female": "👩 Wanita"}.get(gender, "🧑 Lainnya")
+    await query.edit_message_text(
+        f"✅ Gender: <b>{gender_label}</b>\n\n"
         "Langkah 1/2 — Kirim foto <b>target</b>\n"
         "<i>(foto yang wajahnya akan diganti)</i>\n\n"
         "Ketik /cancelfaceswap untuk membatalkan.",
@@ -101,11 +132,9 @@ async def _imagine_cmd(update, context):
     if not await require_member(context.bot, update):
         return
 
-    if not _check_token():
+    if not _check_fal_key():
         await update.message.reply_text(
-            "❌ Fitur AI belum aktif.\n"
-            "Tambahkan <code>REPLICATE_API_TOKEN</code> ke Railway Variables "
-            "(<a href='https://replicate.com'>replicate.com</a> → gratis).",
+            _no_token_msg(),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
@@ -123,17 +152,16 @@ async def _imagine_cmd(update, context):
     msg = await update.message.reply_text("🎨 Membuat gambar, harap tunggu…")
 
     try:
-        output = await replicate.async_run(
+        result = await fal_client.run_async(
             _IMAGINE_MODEL,
-            input={
+            arguments={
                 "prompt": prompt,
-                "num_outputs": 1,
-                "output_format": "jpg",
-                "output_quality": 90,
+                "num_inference_steps": 4,
+                "image_size": "landscape_4_3",
             },
         )
-        image_url = _to_url(output)
-        logger.info(f"imagine output url: {image_url}")
+        image_url = result["images"][0]["url"]
+        logger.info(f"imagine output: {image_url}")
 
         await update.message.reply_photo(
             photo=image_url,
@@ -151,7 +179,7 @@ async def _imagine_cmd(update, context):
 
 
 # ---------------------------------------------------------------------------
-# Photo message handler (handles the 2-step face-swap flow)
+# Photo message handler (handles the 2-step face-swap photo flow)
 # ---------------------------------------------------------------------------
 
 async def _photo_handler(update, context):
@@ -160,12 +188,13 @@ async def _photo_handler(update, context):
     if not state:
         return
 
-    photo = update.message.photo[-1]  # largest available size
+    photo = update.message.photo[-1]  # largest size
 
     # --- Step 1: received target image ---
     if state["step"] == "target":
         _faceswap_state[uid] = {
             "step": "source",
+            "gender": state["gender"],
             "target_file_id": photo.file_id,
         }
         await update.message.reply_text(
@@ -179,27 +208,30 @@ async def _photo_handler(update, context):
     # --- Step 2: received source face — run the swap ---
     if state["step"] == "source":
         target_file_id = state["target_file_id"]
+        gender = state["gender"]
         del _faceswap_state[uid]
 
         msg = await update.message.reply_text("⏳ Memproses face swap, harap tunggu…")
 
         try:
-            # Get direct HTTPS URLs — more reliable than uploading bytes
             target_url, source_url = await asyncio.gather(
                 _get_tg_file_url(context.bot, target_file_id),
                 _get_tg_file_url(context.bot, photo.file_id),
             )
-            logger.info(f"faceswap target_url={target_url} source_url={source_url}")
+            logger.info(f"faceswap gender={gender} target={target_url} source={source_url}")
 
-            output = await replicate.async_run(
+            result = await fal_client.run_async(
                 _FACESWAP_MODEL,
-                input={
-                    "target_img": target_url,   # image to swap face INTO
-                    "source_img": source_url,   # face to use
+                arguments={
+                    "face_image_0":  {"url": source_url},
+                    "gender_0":      gender,
+                    "target_image":  {"url": target_url},
+                    "workflow_type": "user_hair",
+                    "upscale":       True,
                 },
             )
-            image_url = _to_url(output)
-            logger.info(f"faceswap output url: {image_url}")
+            image_url = result["images"][0]["url"]
+            logger.info(f"faceswap output: {image_url}")
 
             await update.message.reply_photo(
                 photo=image_url,
@@ -225,7 +257,12 @@ def setup(app):
     app.add_handler(CommandHandler("cancelfaceswap", _cancel_faceswap_cmd))
     app.add_handler(CommandHandler("imagine",         _imagine_cmd))
 
-    # group=1 so it runs after group=0 handlers
+    # Inline keyboard callback for gender selection
+    app.add_handler(
+        CallbackQueryHandler(_faceswap_callback, pattern=r"^fs_"),
+    )
+
+    # Photo handler — group=1, only fires when user has active faceswap state
     app.add_handler(
         MessageHandler(
             filters.PHOTO & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE,
