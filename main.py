@@ -18,6 +18,7 @@ import handlers.help_handler
 import handlers.admin_handler
 import handlers.info_handler
 import handlers.queue_handler
+import handlers.ai_handler
 
 
 async def post_init(application: Application) -> None:
@@ -48,6 +49,7 @@ def main():
     handlers.admin_handler.setup(application)
     handlers.info_handler.setup(application)
     handlers.queue_handler.setup(application)
+    handlers.ai_handler.setup(application)
 
     logger.info("Starting polling...")
     application.run_polling(

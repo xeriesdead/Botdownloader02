@@ -57,3 +57,9 @@ YTDL_PROXY: str | None = os.getenv("YTDL_PROXY") or None
 # api.cobalt.tools sekarang memerlukan API key untuk akses publik.
 # Daftar di https://cobalt.tools dan dapatkan key-nya.
 COBALT_API_KEY: str | None = os.getenv("COBALT_API_KEY") or None
+
+# Token Replicate untuk fitur AI (Face Swap, Image Generation).
+# Daftar gratis di https://replicate.com — set di Railway/Replit Secrets.
+# Nama variabel HARUS "REPLICATE_API_TOKEN" (dibaca otomatis oleh SDK Replicate).
+# Jika tidak diset, perintah /faceswap dan /imagine akan menampilkan pesan error.
+REPLICATE_API_TOKEN: str | None = os.getenv("REPLICATE_API_TOKEN") or None
