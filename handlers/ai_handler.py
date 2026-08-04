@@ -99,7 +99,9 @@ async def _magichour_faceswap(target_bytes: bytes, source_bytes: bytes) -> str:
         "Accept": "application/json",
     }
 
-    async with aiohttp.ClientSession() as session:
+    # 30 s per individual HTTP call; overall handler timeout is 3 min (loop below)
+    per_req_timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=per_req_timeout) as session:
         # 1. Upload both images to Magic Hour storage
         target_path, source_path = await asyncio.gather(
             _mh_upload(session, api_key, target_bytes),
@@ -112,8 +114,8 @@ async def _magichour_faceswap(target_bytes: bytes, source_bytes: bytes) -> str:
             "name": "Telegram Bot Face Swap",
             "assets": {
                 "face_swap_mode": "all-faces",
-                "source_file_path": target_path,
-                "target_file_path": target_path,
+                "target_file_path": target_path,   # photo whose face gets replaced
+                "source_file_path": source_path,   # photo that provides the new face
                 "face_mappings": [
                     {
                         "new_face":      source_path,
@@ -133,24 +135,29 @@ async def _magichour_faceswap(target_bytes: bytes, source_bytes: bytes) -> str:
                 raise Exception(f"MH create failed ({resp.status}): {data}")
             job_id = data["id"]
 
-        # 3. Poll until complete (max ~3 min)
-        for attempt in range(60):
-            await asyncio.sleep(3)
-            async with session.get(
-                f"{_MH_BASE}/v1/image-projects/{job_id}",
-                headers=auth_headers,
-            ) as resp:
-                poll = await resp.json()
-                status = poll.get("status", "unknown")
-                logger.info(f"MH poll #{attempt + 1} status={status}")
+        # 3. Poll until complete (max ~3 min, 5 s interval)
+        for attempt in range(36):
+            await asyncio.sleep(5)
+            try:
+                async with session.get(
+                    f"{_MH_BASE}/v1/image-projects/{job_id}",
+                    headers=auth_headers,
+                ) as resp:
+                    poll = await resp.json()
+            except asyncio.TimeoutError:
+                logger.warning(f"MH poll #{attempt + 1} timed out, retrying…")
+                continue
 
-                if status == "complete":
-                    downloads = poll.get("downloads", [])
-                    if not downloads:
-                        raise Exception("MH complete but no downloads")
-                    return downloads[0]["url"]
-                if status in ("error", "canceled"):
-                    raise Exception(f"MH job {status}: {poll.get('error', 'no detail')}")
+            status = poll.get("status", "unknown")
+            logger.info(f"MH poll #{attempt + 1} status={status}")
+
+            if status == "complete":
+                downloads = poll.get("downloads", [])
+                if not downloads:
+                    raise Exception("MH complete but no downloads")
+                return downloads[0]["url"]
+            if status in ("error", "canceled"):
+                raise Exception(f"MH job {status}: {poll.get('error', 'no detail')}")
 
     raise Exception("Face swap timed out after 3 minutes")
 
