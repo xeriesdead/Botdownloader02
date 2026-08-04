@@ -44,44 +44,84 @@ def _hf_token() -> str | None:
     return os.getenv("HF_TOKEN")
 
 
-async def _get_tg_file_url(bot, file_id: str) -> str:
+async def _download_tg_bytes(bot, file_id: str) -> bytes:
+    """Download a Telegram photo as raw bytes."""
     tg_file = await bot.get_file(file_id)
-    return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{tg_file.file_path}"
+    data = await tg_file.download_as_bytearray()
+    return bytes(data)
 
 
 # ---------------------------------------------------------------------------
-# Magic Hour — face swap  (async REST + polling)
+# Magic Hour — face swap  (async REST: upload → create job → poll)
 # ---------------------------------------------------------------------------
 
-async def _magichour_faceswap(target_url: str, source_url: str) -> str:
-    """Submit face-swap job and poll until complete. Returns download URL."""
-    api_key = _mh_key()
-    headers = {
+async def _mh_upload(session: aiohttp.ClientSession, api_key: str,
+                     image_bytes: bytes) -> str:
+    """Upload one image to Magic Hour storage. Returns file_path like 'api-assets/id/xxx.jpg'."""
+    auth_headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    payload = {
-        "name": "Telegram Bot Face Swap",
-        "assets": {
-            "face_swap_mode": "all-faces",
-            "source_file_path": target_url,  # image to modify
-            "target_file_path": target_url,  # required — same image
-            "face_mappings": [
-                {
-                    "new_face":      source_url,  # face to insert
-                    "original_face": target_url,  # face to replace (target image)
-                }
-            ],
-        },
+    # Step 1 — get pre-signed upload URL
+    async with session.post(
+        f"{_MH_BASE}/v1/files/upload-urls",
+        json={"items": [{"type": "image", "extension": "jpg"}]},
+        headers=auth_headers,
+    ) as resp:
+        data = await resp.json()
+        logger.info(f"MH upload-urls {resp.status}: {data}")
+        if resp.status not in (200, 201):
+            raise Exception(f"MH upload-urls failed ({resp.status}): {data}")
+        item = data[0]
+        upload_url = item["upload_url"]
+        file_path  = item["file_path"]
+
+    # Step 2 — PUT raw bytes to the pre-signed URL
+    async with session.put(upload_url, data=image_bytes) as resp:
+        if resp.status not in (200, 204):
+            text = await resp.text()
+            raise Exception(f"MH S3 PUT failed ({resp.status}): {text[:200]}")
+
+    return file_path
+
+
+async def _magichour_faceswap(target_bytes: bytes, source_bytes: bytes) -> str:
+    """Upload both images, submit face-swap job, poll until complete. Returns download URL."""
+    api_key = _mh_key()
+    auth_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
     }
 
     async with aiohttp.ClientSession() as session:
-        # 1. Create the job
+        # 1. Upload both images to Magic Hour storage
+        target_path, source_path = await asyncio.gather(
+            _mh_upload(session, api_key, target_bytes),
+            _mh_upload(session, api_key, source_bytes),
+        )
+        logger.info(f"MH uploaded target={target_path} source={source_path}")
+
+        # 2. Create the face-swap job
+        payload = {
+            "name": "Telegram Bot Face Swap",
+            "assets": {
+                "face_swap_mode": "all-faces",
+                "source_file_path": target_path,
+                "target_file_path": target_path,
+                "face_mappings": [
+                    {
+                        "new_face":      source_path,
+                        "original_face": target_path,
+                    }
+                ],
+            },
+        }
         async with session.post(
             f"{_MH_BASE}/v1/face-swap-photo",
             json=payload,
-            headers=headers,
+            headers=auth_headers,
         ) as resp:
             data = await resp.json()
             logger.info(f"MH create {resp.status}: {data}")
@@ -89,12 +129,12 @@ async def _magichour_faceswap(target_url: str, source_url: str) -> str:
                 raise Exception(f"MH create failed ({resp.status}): {data}")
             job_id = data["id"]
 
-        # 2. Poll until complete (max ~3 min)
+        # 3. Poll until complete (max ~3 min)
         for attempt in range(60):
             await asyncio.sleep(3)
             async with session.get(
                 f"{_MH_BASE}/v1/image-projects/{job_id}",
-                headers=headers,
+                headers=auth_headers,
             ) as resp:
                 poll = await resp.json()
                 status = poll.get("status", "unknown")
@@ -103,7 +143,7 @@ async def _magichour_faceswap(target_url: str, source_url: str) -> str:
                 if status == "complete":
                     downloads = poll.get("downloads", [])
                     if not downloads:
-                        raise Exception("MH job complete but downloads list is empty")
+                        raise Exception("MH complete but no downloads")
                     return downloads[0]["url"]
                 if status in ("error", "canceled"):
                     raise Exception(f"MH job {status}: {poll.get('error', 'no detail')}")
@@ -270,13 +310,13 @@ async def _photo_handler(update, context):
 
         msg = await update.message.reply_text("⏳ Memproses face swap, harap tunggu…")
         try:
-            target_url, source_url = await asyncio.gather(
-                _get_tg_file_url(context.bot, target_file_id),
-                _get_tg_file_url(context.bot, photo.file_id),
+            target_bytes, source_bytes = await asyncio.gather(
+                _download_tg_bytes(context.bot, target_file_id),
+                _download_tg_bytes(context.bot, photo.file_id),
             )
-            logger.info(f"faceswap target={target_url} source={source_url}")
+            logger.info("faceswap: images downloaded, uploading to Magic Hour…")
 
-            result_url = await _magichour_faceswap(target_url, source_url)
+            result_url = await _magichour_faceswap(target_bytes, source_bytes)
             logger.info(f"faceswap result={result_url}")
 
             await update.message.reply_photo(
