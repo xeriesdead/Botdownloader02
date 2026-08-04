@@ -65,8 +65,14 @@ async def _magichour_faceswap(target_url: str, source_url: str) -> str:
         "name": "Telegram Bot Face Swap",
         "assets": {
             "face_swap_mode": "all-faces",
-            "source_file_path": target_url,       # image to modify
-            "face_mappings": [{"new_face": source_url}],  # face to use
+            "source_file_path": target_url,  # image to modify
+            "target_file_path": target_url,  # required — same image
+            "face_mappings": [
+                {
+                    "new_face":      source_url,  # face to insert
+                    "original_face": target_url,  # face to replace (target image)
+                }
+            ],
         },
     }
 
