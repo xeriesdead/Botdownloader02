@@ -73,7 +73,11 @@ async def _mh_upload(session: aiohttp.ClientSession, api_key: str,
         logger.info(f"MH upload-urls {resp.status}: {data}")
         if resp.status not in (200, 201):
             raise Exception(f"MH upload-urls failed ({resp.status}): {data}")
-        item = data[0]
+        # Response may be a list OR wrapped: {"data": [...]}
+        items_list = data if isinstance(data, list) else data.get("data", data.get("items", []))
+        if not items_list:
+            raise Exception(f"MH upload-urls unexpected response shape: {data}")
+        item = items_list[0]
         upload_url = item["upload_url"]
         file_path  = item["file_path"]
 
