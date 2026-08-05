@@ -46,8 +46,8 @@ def _hf_token() -> str | None:
 
 async def _download_tg_bytes(bot, file_id: str) -> bytes:
     """Download a Telegram photo as raw bytes."""
-    tg_file = await bot.get_file(file_id)
-    data = await tg_file.download_as_bytearray()
+    tg_file = await bot.get_file(file_id, read_timeout=60, connect_timeout=30)
+    data = await tg_file.download_as_bytearray(read_timeout=60, connect_timeout=30)
     return bytes(data)
 
 
@@ -99,8 +99,8 @@ async def _magichour_faceswap(target_bytes: bytes, source_bytes: bytes) -> str:
         "Accept": "application/json",
     }
 
-    # 30 s per individual HTTP call; overall handler timeout is 3 min (loop below)
-    per_req_timeout = aiohttp.ClientTimeout(total=30)
+    # 120 s per individual HTTP call (upload to S3 can be slow for large photos)
+    per_req_timeout = aiohttp.ClientTimeout(total=120)
     async with aiohttp.ClientSession(timeout=per_req_timeout) as session:
         # 1. Upload both images to Magic Hour storage
         target_path, source_path = await asyncio.gather(
@@ -331,6 +331,9 @@ async def _photo_handler(update, context):
                 photo=result_url,
                 caption="✅ <b>Face swap selesai!</b>",
                 parse_mode=ParseMode.HTML,
+                read_timeout=60,
+                write_timeout=60,
+                connect_timeout=30,
             )
             await msg.delete()
 
