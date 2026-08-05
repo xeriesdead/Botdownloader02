@@ -1078,6 +1078,40 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         logger.info("[social] Threads detected, using cobalt API: %s", url)
         return _cobalt_download_sync(url, work_dir)
 
+    # ── Instagram: cobalt first, then yt-dlp fallback ────────────────────
+    _is_instagram = "instagram.com" in (urlparse(url).hostname or "").lower()
+    if _is_instagram:
+        logger.info("[social] Instagram detected, trying cobalt first: %s", url)
+        sub_cobalt = os.path.join(work_dir, "cobalt")
+        os.makedirs(sub_cobalt, exist_ok=True)
+        try:
+            title, files = _cobalt_download_sync(url, sub_cobalt)
+            if files:
+                logger.info("[social] Instagram: cobalt berhasil (%d file)", len(files))
+                return title, files
+        except Exception as exc:
+            logger.warning("[social] Instagram: cobalt gagal, fallback ke yt-dlp: %s", exc)
+        # yt-dlp fallback (may fail if login required)
+        sub_ytdlp = os.path.join(work_dir, "ytdlp")
+        os.makedirs(sub_ytdlp, exist_ok=True)
+        try:
+            with yt_dlp.YoutubeDL({**options, "outtmpl": str(Path(sub_ytdlp) / "%(autonumber)03d_%(title).80s.%(ext)s")}) as ydl:
+                info = ydl.extract_info(url, download=True)
+            title = (info or {}).get("title") or "Instagram"
+            files = [str(p) for p in Path(sub_ytdlp).rglob("*")
+                     if p.is_file() and p.suffix.lower() not in _IGNORED_SUFFIXES]
+            if files:
+                logger.info("[social] Instagram: yt-dlp berhasil (%d file)", len(files))
+                return title, sorted(files)
+        except Exception as exc:
+            logger.warning("[social] Instagram: yt-dlp juga gagal: %s", exc)
+        raise ValueError(
+            "❌ Gagal mendownload dari Instagram.\n"
+            "Instagram memblokir download otomatis. Kemungkinan konten bersifat privat "
+            "atau memerlukan login.\n\n"
+            "<i>Hanya Reel/post publik yang bisa didownload.</i>"
+        )
+
     ytdlp_error_msg: str | None = None
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
@@ -1118,8 +1152,17 @@ async def download_public_media(url: str, user_id: int) -> tuple[str, list[str],
     os.makedirs(_TEMP_ROOT, exist_ok=True)
     work_dir = tempfile.mkdtemp(prefix=f"social_{user_id}_", dir=_TEMP_ROOT)
     try:
-        title, files = await asyncio.to_thread(_download_sync, url, work_dir)
+        title, files = await asyncio.wait_for(
+            asyncio.to_thread(_download_sync, url, work_dir),
+            timeout=90,
+        )
         return title, files, work_dir
+    except asyncio.TimeoutError:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise ValueError(
+            "❌ Download terlalu lama dan dibatalkan (>90 detik).\n"
+            "Coba lagi nanti atau gunakan link lain."
+        )
     except Exception as exc:
         # Retry sekali otomatis untuk error transien:
         # - ValueError dengan pesan transien (misal Instagram empty media response)
