@@ -110,27 +110,23 @@ async def _magichour_faceswap(target_bytes: bytes, source_bytes: bytes) -> str:
         logger.info(f"MH uploaded target={target_path} source={source_path}")
 
         # 2. Create the face-swap job
+        # target_file_path = photo whose face gets replaced
+        # source_file_path = photo that provides the new face
         payload = {
             "name": "Telegram Bot Face Swap",
             "assets": {
-                "face_swap_mode": "all-faces",
-                "target_file_path": target_path,   # photo whose face gets replaced
-                "source_file_path": source_path,   # photo that provides the new face
-                "face_mappings": [
-                    {
-                        "new_face":      source_path,
-                        "original_face": target_path,
-                    }
-                ],
+                "target_file_path": target_path,
+                "source_file_path": source_path,
             },
         }
+        logger.info(f"MH create payload: {payload}")
         async with session.post(
             f"{_MH_BASE}/v1/face-swap-photo",
             json=payload,
             headers=auth_headers,
         ) as resp:
             data = await resp.json()
-            logger.info(f"MH create {resp.status}: {data}")
+            logger.info(f"MH create {resp.status} full response: {data}")
             if resp.status not in (200, 201):
                 raise Exception(f"MH create failed ({resp.status}): {data}")
             job_id = data["id"]
@@ -149,10 +145,11 @@ async def _magichour_faceswap(target_bytes: bytes, source_bytes: bytes) -> str:
                 continue
 
             status = poll.get("status", "unknown")
-            logger.info(f"MH poll #{attempt + 1} status={status}")
+            logger.info(f"MH poll #{attempt + 1} status={status} full={poll}")
 
             if status == "complete":
                 downloads = poll.get("downloads", [])
+                logger.info(f"MH complete downloads={downloads}")
                 if not downloads:
                     raise Exception("MH complete but no downloads")
                 return downloads[0]["url"]
