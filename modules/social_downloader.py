@@ -768,6 +768,98 @@ def _extract_instagram_shortcode(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _instagram_embed_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+    """
+    Scrape halaman embed Instagram untuk mendapatkan URL media tanpa login.
+    Bekerja untuk post/reel publik.
+    Returns (title, list_of_file_paths).
+    """
+    import re
+
+    shortcode = _extract_instagram_shortcode(url)
+    if not shortcode:
+        raise ValueError(f"Tidak dapat mengekstrak shortcode dari URL Instagram: {url}")
+
+    embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+    _IG_UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+    req = urllib.request.Request(
+        embed_url,
+        headers={
+            "User-Agent":      _IG_UA,
+            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer":         "https://www.instagram.com/",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        html = resp.read().decode("utf-8", errors="replace")
+
+    def _fetch(src: str, dest: str) -> None:
+        req2 = urllib.request.Request(src, headers={"User-Agent": _IG_UA, "Referer": "https://www.instagram.com/"})
+        with urllib.request.urlopen(req2, timeout=120) as r:
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = r.read(512 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+
+    def _clean(raw: str) -> str:
+        return raw.replace("\\u0026", "&").replace("\\/", "/").replace("\\\\", "\\")
+
+    files: list[str] = []
+    title = "Instagram"
+
+    # Coba ekstrak judul dari caption
+    cap_m = re.search(r'"caption"\s*:\s*"((?:[^"\\]|\\.){0,300})"', html)
+    if cap_m:
+        title = cap_m.group(1).replace("\\n", " ").strip()[:160] or "Instagram"
+
+    # Coba video dulu
+    for pat in (
+        r'"video_url"\s*:\s*"((?:[^"\\]|\\.)+)"',
+        r'video_url\\?\":\\?\"((?:[^"\\]|\\.)+)',
+    ):
+        m = re.search(pat, html)
+        if m:
+            video_url = _clean(m.group(1))
+            dest = os.path.join(work_dir, "001_video.mp4")
+            try:
+                _fetch(video_url, dest)
+                files.append(dest)
+                logger.info("[social] instagram embed: video downloaded %d bytes", os.path.getsize(dest))
+            except Exception as exc:
+                logger.warning("[social] instagram embed: video fetch gagal: %s", exc)
+            break
+
+    # Kalau tidak ada video, coba gambar
+    if not files:
+        for pat in (
+            r'"display_url"\s*:\s*"((?:[^"\\]|\\.)+)"',
+            r'display_url\\?\":\\?\"((?:[^"\\]|\\.)+)',
+        ):
+            m = re.search(pat, html)
+            if m:
+                img_url = _clean(m.group(1))
+                dest = os.path.join(work_dir, "001_image.jpg")
+                try:
+                    _fetch(img_url, dest)
+                    files.append(dest)
+                    logger.info("[social] instagram embed: image downloaded %d bytes", os.path.getsize(dest))
+                except Exception as exc:
+                    logger.warning("[social] instagram embed: image fetch gagal: %s", exc)
+                break
+
+    if not files:
+        raise ValueError("instagram-embed: tidak ada media yang ditemukan di halaman embed.")
+
+    return title, sorted(files)
+
+
 def _instaloader_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
     Download public Instagram post/reel via instaloader (no login needed).
@@ -781,6 +873,23 @@ def _instaloader_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         raise ValueError(f"Tidak dapat mengekstrak shortcode dari URL Instagram: {url}")
 
     logger.info("[social] instaloader shortcode=%s", shortcode)
+
+    # Gunakan custom context agar bisa set request_timeout dan user agent
+    try:
+        ctx = instaloader.InstaloaderContext(
+            sleep=False,
+            quiet=True,
+            request_timeout=20,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
+    except TypeError:
+        # Versi instaloader lama tidak kenal semua parameter — fallback ke default
+        ctx = instaloader.InstaloaderContext(sleep=False, quiet=True)
+
     L = instaloader.Instaloader(
         download_video_thumbnails=False,
         save_metadata=False,
@@ -788,9 +897,18 @@ def _instaloader_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         quiet=True,
         dirname_pattern=work_dir,
         filename_pattern="{shortcode}_{media_number:02}",
+        context=ctx,
     )
 
-    post = instaloader.Post.from_shortcode(L.context, shortcode)
+    try:
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+    except instaloader.exceptions.LoginRequiredException:
+        raise ValueError("instaloader: konten ini memerlukan login Instagram.")
+    except instaloader.exceptions.QueryReturnedBadContentException as exc:
+        raise ValueError(f"instaloader: Instagram menolak request (rate limit / bot detection): {exc}")
+    except instaloader.exceptions.InstaloaderException as exc:
+        raise ValueError(f"instaloader: {exc}")
+
     title = (post.caption or "Instagram").split("\n")[0][:160] or "Instagram"
     L.download_post(post, target=work_dir)
 
@@ -1141,14 +1259,17 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         logger.info("[social] Threads detected, using cobalt API: %s", url)
         return _cobalt_download_sync(url, work_dir)
 
-    # ── Instagram: instaloader → cobalt → yt-dlp ─────────────────────────
+    # ── Instagram: cobalt → embed-scrape → instaloader → yt-dlp ─────────
+    # Urutan: cobalt paling andal tanpa auth; embed-scrape untuk publik;
+    # instaloader sering kena rate-limit/login di 2025+; yt-dlp last resort.
     _is_instagram = "instagram.com" in (urlparse(url).hostname or "").lower()
     if _is_instagram:
         logger.info("[social] Instagram detected: %s", url)
         _ig_strategies = [
-            ("instaloader", lambda d: _instaloader_sync(url, d)),
-            ("cobalt",      lambda d: _cobalt_download_sync(url, d)),
-            ("ytdlp",       lambda d: _ytdlp_instagram_sync(url, d, options)),
+            ("cobalt",        lambda d: _cobalt_download_sync(url, d)),
+            ("embed-scrape",  lambda d: _instagram_embed_sync(url, d)),
+            ("instaloader",   lambda d: _instaloader_sync(url, d)),
+            ("ytdlp",         lambda d: _ytdlp_instagram_sync(url, d, options)),
         ]
         _ig_errors = []
         for _name, _fn in _ig_strategies:
