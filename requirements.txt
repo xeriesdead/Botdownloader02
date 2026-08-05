@@ -8,3 +8,4 @@ psycopg2-binary
 yt-dlp>=2025.1.15
 gallery-dl
 pytubefix
+instaloader

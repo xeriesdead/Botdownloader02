@@ -761,6 +761,69 @@ def _is_youtube_link(url: str) -> bool:
     )
 
 
+def _extract_instagram_shortcode(url: str) -> str | None:
+    """Extract Instagram shortcode from /p/, /reel/, /tv/ URLs."""
+    import re
+    m = re.search(r"/(?:p|reel|tv|reels)/([A-Za-z0-9_-]+)", url)
+    return m.group(1) if m else None
+
+
+def _instaloader_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+    """
+    Download public Instagram post/reel via instaloader (no login needed).
+    Returns (title, list_of_file_paths).
+    """
+    import instaloader
+    import glob
+
+    shortcode = _extract_instagram_shortcode(url)
+    if not shortcode:
+        raise ValueError(f"Tidak dapat mengekstrak shortcode dari URL Instagram: {url}")
+
+    logger.info("[social] instaloader shortcode=%s", shortcode)
+    L = instaloader.Instaloader(
+        download_video_thumbnails=False,
+        save_metadata=False,
+        post_metadata_txt_pattern="",
+        quiet=True,
+        dirname_pattern=work_dir,
+        filename_pattern="{shortcode}_{media_number:02}",
+    )
+
+    post = instaloader.Post.from_shortcode(L.context, shortcode)
+    title = (post.caption or "Instagram").split("\n")[0][:160] or "Instagram"
+    L.download_post(post, target=work_dir)
+
+    files = [
+        f for f in glob.glob(os.path.join(work_dir, "**", "*"), recursive=True)
+        if os.path.isfile(f) and not f.endswith((".txt", ".json", ".xz"))
+    ]
+    if not files:
+        raise ValueError("instaloader: tidak ada file yang terdownload.")
+
+    logger.info("[social] instaloader berhasil: %d file", len(files))
+    return title, sorted(files)
+
+
+def _ytdlp_instagram_sync(url: str, work_dir: str, base_options: dict) -> tuple[str, list[str]]:
+    """yt-dlp fallback for Instagram (may fail if login required)."""
+    opts = {
+        **base_options,
+        "outtmpl": str(Path(work_dir) / "%(autonumber)03d_%(title).80s.%(ext)s"),
+        "socket_timeout": 15,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+    title = (info or {}).get("title") or "Instagram"
+    files = [
+        str(p) for p in Path(work_dir).rglob("*")
+        if p.is_file() and p.suffix.lower() not in _IGNORED_SUFFIXES
+    ]
+    if not files:
+        raise ValueError("yt-dlp: tidak ada file yang terdownload dari Instagram.")
+    return title, sorted(files)
+
+
 def _tikwm_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
     Download TikTok video/photo via tikwm.com public API (no auth required).
@@ -1078,37 +1141,31 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         logger.info("[social] Threads detected, using cobalt API: %s", url)
         return _cobalt_download_sync(url, work_dir)
 
-    # ── Instagram: cobalt first, then yt-dlp fallback ────────────────────
+    # ── Instagram: instaloader → cobalt → yt-dlp ─────────────────────────
     _is_instagram = "instagram.com" in (urlparse(url).hostname or "").lower()
     if _is_instagram:
-        logger.info("[social] Instagram detected, trying cobalt first: %s", url)
-        sub_cobalt = os.path.join(work_dir, "cobalt")
-        os.makedirs(sub_cobalt, exist_ok=True)
-        try:
-            title, files = _cobalt_download_sync(url, sub_cobalt)
-            if files:
-                logger.info("[social] Instagram: cobalt berhasil (%d file)", len(files))
-                return title, files
-        except Exception as exc:
-            logger.warning("[social] Instagram: cobalt gagal, fallback ke yt-dlp: %s", exc)
-        # yt-dlp fallback (may fail if login required)
-        sub_ytdlp = os.path.join(work_dir, "ytdlp")
-        os.makedirs(sub_ytdlp, exist_ok=True)
-        try:
-            with yt_dlp.YoutubeDL({**options, "outtmpl": str(Path(sub_ytdlp) / "%(autonumber)03d_%(title).80s.%(ext)s")}) as ydl:
-                info = ydl.extract_info(url, download=True)
-            title = (info or {}).get("title") or "Instagram"
-            files = [str(p) for p in Path(sub_ytdlp).rglob("*")
-                     if p.is_file() and p.suffix.lower() not in _IGNORED_SUFFIXES]
-            if files:
-                logger.info("[social] Instagram: yt-dlp berhasil (%d file)", len(files))
-                return title, sorted(files)
-        except Exception as exc:
-            logger.warning("[social] Instagram: yt-dlp juga gagal: %s", exc)
+        logger.info("[social] Instagram detected: %s", url)
+        _ig_strategies = [
+            ("instaloader", lambda d: _instaloader_sync(url, d)),
+            ("cobalt",      lambda d: _cobalt_download_sync(url, d)),
+            ("ytdlp",       lambda d: _ytdlp_instagram_sync(url, d, options)),
+        ]
+        _ig_errors = []
+        for _name, _fn in _ig_strategies:
+            _sub = os.path.join(work_dir, _name)
+            os.makedirs(_sub, exist_ok=True)
+            try:
+                _title, _files = _fn(_sub)
+                if _files:
+                    logger.info("[social] Instagram: %s berhasil (%d file)", _name, len(_files))
+                    return _title, _files
+            except Exception as _exc:
+                _ig_errors.append(f"[{_name}] {_exc}")
+                logger.warning("[social] Instagram: %s gagal: %s", _name, _exc)
+        logger.error("[social] Instagram: semua strategi gagal:\n%s", "\n".join(_ig_errors))
         raise ValueError(
             "❌ Gagal mendownload dari Instagram.\n"
-            "Instagram memblokir download otomatis. Kemungkinan konten bersifat privat "
-            "atau memerlukan login.\n\n"
+            "Kemungkinan konten bersifat privat atau memerlukan login.\n\n"
             "<i>Hanya Reel/post publik yang bisa didownload.</i>"
         )
 
