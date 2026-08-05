@@ -867,6 +867,7 @@ def _instaloader_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
     import instaloader
     import glob
+    import socket as _socket
 
     shortcode = _extract_instagram_shortcode(url)
     if not shortcode:
@@ -874,53 +875,64 @@ def _instaloader_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
 
     logger.info("[social] instaloader shortcode=%s", shortcode)
 
-    # Gunakan custom context agar bisa set request_timeout dan user agent
+    # Set socket timeout global untuk thread ini — memastikan setiap network call
+    # tidak hang lebih dari 20 detik, bahkan jika InstaloaderContext tidak mendukung
+    # parameter request_timeout (versi lama).
+    _prev_sock_timeout = _socket.getdefaulttimeout()
+    _socket.setdefaulttimeout(20)
+
     try:
-        ctx = instaloader.InstaloaderContext(
-            sleep=False,
+        # Gunakan custom context agar bisa set request_timeout dan user agent
+        try:
+            ctx = instaloader.InstaloaderContext(
+                sleep=False,
+                quiet=True,
+                request_timeout=20,
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            )
+        except TypeError:
+            # Versi instaloader lama tidak kenal semua parameter — fallback ke default.
+            # Socket timeout di atas tetap aktif sebagai jaring pengaman.
+            ctx = instaloader.InstaloaderContext(sleep=False, quiet=True)
+
+        L = instaloader.Instaloader(
+            download_video_thumbnails=False,
+            save_metadata=False,
+            post_metadata_txt_pattern="",
             quiet=True,
-            request_timeout=20,
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
+            dirname_pattern=work_dir,
+            filename_pattern="{shortcode}_{media_number:02}",
+            context=ctx,
         )
-    except TypeError:
-        # Versi instaloader lama tidak kenal semua parameter — fallback ke default
-        ctx = instaloader.InstaloaderContext(sleep=False, quiet=True)
 
-    L = instaloader.Instaloader(
-        download_video_thumbnails=False,
-        save_metadata=False,
-        post_metadata_txt_pattern="",
-        quiet=True,
-        dirname_pattern=work_dir,
-        filename_pattern="{shortcode}_{media_number:02}",
-        context=ctx,
-    )
+        try:
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+        except instaloader.exceptions.LoginRequiredException:
+            raise ValueError("instaloader: konten ini memerlukan login Instagram.")
+        except instaloader.exceptions.QueryReturnedBadContentException as exc:
+            raise ValueError(f"instaloader: Instagram menolak request (rate limit / bot detection): {exc}")
+        except instaloader.exceptions.InstaloaderException as exc:
+            raise ValueError(f"instaloader: {exc}")
 
-    try:
-        post = instaloader.Post.from_shortcode(L.context, shortcode)
-    except instaloader.exceptions.LoginRequiredException:
-        raise ValueError("instaloader: konten ini memerlukan login Instagram.")
-    except instaloader.exceptions.QueryReturnedBadContentException as exc:
-        raise ValueError(f"instaloader: Instagram menolak request (rate limit / bot detection): {exc}")
-    except instaloader.exceptions.InstaloaderException as exc:
-        raise ValueError(f"instaloader: {exc}")
+        title = (post.caption or "Instagram").split("\n")[0][:160] or "Instagram"
+        L.download_post(post, target=work_dir)
 
-    title = (post.caption or "Instagram").split("\n")[0][:160] or "Instagram"
-    L.download_post(post, target=work_dir)
+        files = [
+            f for f in glob.glob(os.path.join(work_dir, "**", "*"), recursive=True)
+            if os.path.isfile(f) and not f.endswith((".txt", ".json", ".xz"))
+        ]
+        if not files:
+            raise ValueError("instaloader: tidak ada file yang terdownload.")
 
-    files = [
-        f for f in glob.glob(os.path.join(work_dir, "**", "*"), recursive=True)
-        if os.path.isfile(f) and not f.endswith((".txt", ".json", ".xz"))
-    ]
-    if not files:
-        raise ValueError("instaloader: tidak ada file yang terdownload.")
+        logger.info("[social] instaloader berhasil: %d file", len(files))
+        return title, sorted(files)
 
-    logger.info("[social] instaloader berhasil: %d file", len(files))
-    return title, sorted(files)
+    finally:
+        _socket.setdefaulttimeout(_prev_sock_timeout)
 
 
 def _ytdlp_instagram_sync(url: str, work_dir: str, base_options: dict) -> tuple[str, list[str]]:
@@ -1351,8 +1363,19 @@ async def download_public_media(url: str, user_id: int) -> tuple[str, list[str],
             logger.info("[social] transient error, retrying once in 3s: %s", exc)
             await asyncio.sleep(3)
             try:
-                title, files = await asyncio.to_thread(_download_sync, url, work_dir)
+                # PENTING: retry HARUS dibungkus wait_for — tanpa ini,
+                # jika thread hang maka bot stuck selamanya sampai JOB_TIMEOUT.
+                title, files = await asyncio.wait_for(
+                    asyncio.to_thread(_download_sync, url, work_dir),
+                    timeout=90,
+                )
                 return title, files, work_dir
+            except asyncio.TimeoutError:
+                shutil.rmtree(work_dir, ignore_errors=True)
+                raise ValueError(
+                    "❌ Download terlalu lama dan dibatalkan (>90 detik).\n"
+                    "Coba lagi nanti atau gunakan link lain."
+                )
             except Exception:
                 shutil.rmtree(work_dir, ignore_errors=True)
                 raise

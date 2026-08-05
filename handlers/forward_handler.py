@@ -276,9 +276,19 @@ def setup(app):
             except asyncio.CancelledError:
                 refund_quota()
                 try:
-                    await edit(
-                        "❌ <b>Timeout:</b> Proses terlalu lama dan dibatalkan.\n"
-                        "Coba lagi — jika terus gagal, file mungkin terlalu besar."
+                    # Gunakan create_task (bukan await langsung) karena await di dalam
+                    # CancelledError handler akan ikut ter-cancel sebelum selesai,
+                    # sehingga pesan error tidak pernah terkirim ke user.
+                    asyncio.create_task(
+                        bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=pmsg.message_id,
+                            text=(
+                                "❌ <b>Timeout:</b> Proses terlalu lama dan dibatalkan.\n"
+                                "Coba lagi — jika terus gagal, file mungkin terlalu besar."
+                            ),
+                            parse_mode=ParseMode.HTML,
+                        )
                     )
                 except Exception:
                     pass
