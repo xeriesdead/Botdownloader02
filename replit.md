@@ -37,4 +37,15 @@ A Python Telegram bot with file forwarding, premium subscriptions, user quota ma
 2. Install dependencies: `pip install -r requirements.txt`
 3. Run: `python main.py`
 
+## Workflow: Replit → GitHub → Railway
+
+Setiap perubahan kode dikerjakan di Replit, lalu di-push ke GitHub (`xeriesdead/Botdownloader02`). Railway otomatis mendeteksi Dockerfile dan redeploy dari branch `main`.
+
+**Langkah per perubahan:**
+1. Edit kode di Replit
+2. Agent push ke GitHub (branch `main`)
+3. Railway redeploy otomatis
+
+Mode yang dipakai di Railway: **webhook** (`webhook_server.py` + `Dockerfile`).
+
 ## User preferences
