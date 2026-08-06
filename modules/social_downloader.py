@@ -86,10 +86,10 @@ _THREADS_DOMAINS  = {"threads.net", "threads.com"}
 
 # Cobalt instances yang akan dicoba secara berurutan
 # Instance pertama = prioritas utama; berikutnya = fallback
+# Catatan: cobalt v7+ memerlukan JWT auth (Authorization: Api-Key),
+# jika tidak ada API key maka semua request akan ditolak dengan 401.
 _COBALT_INSTANCES = [
     "https://api.cobalt.tools/",
-    "https://cobalt.api.t.me/",       # Telegram-hosted instance
-    "https://co.wuk.sh/",             # alternatif community instance
 ]
 _COBALT_UA        = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -101,6 +101,36 @@ _COBALT_UA        = (
 _YTDL_PROXY: str | None = None
 # Cobalt API key (dari env COBALT_API_KEY)
 _COBALT_API_KEY: str | None = None
+
+# Instagram cookies (dari env INSTAGRAM_COOKIES)
+_IG_COOKIE_FILE: str | None = None
+
+def _init_ig_cookie_file() -> None:
+    global _IG_COOKIE_FILE
+    try:
+        from config import INSTAGRAM_COOKIES  # type: ignore[attr-defined]
+        if not INSTAGRAM_COOKIES:
+            logger.info("[social] INSTAGRAM_COOKIES tidak diset — Instagram tanpa cookies")
+            return
+        content = INSTAGRAM_COOKIES
+        if "\\n" in content and "\n" not in content:
+            content = content.replace("\\n", "\n")
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+        if not content.lstrip().startswith("# Netscape"):
+            content = "# Netscape HTTP Cookie File\n" + content
+        cookie_dir = os.path.join(os.path.dirname(__file__), "..", "downloads")
+        os.makedirs(cookie_dir, exist_ok=True)
+        cookie_path = os.path.join(cookie_dir, ".ig_cookies.txt")
+        with open(cookie_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        data_lines = [l for l in content.splitlines() if l.strip() and not l.startswith("#")]
+        logger.info("[social] Instagram cookies ditulis ke %s (%d baris)", cookie_path, len(data_lines))
+        if data_lines:
+            _IG_COOKIE_FILE = cookie_path
+        else:
+            logger.warning("[social] INSTAGRAM_COOKIES tidak mengandung data — periksa format!")
+    except Exception as exc:
+        logger.warning("[social] Gagal inisialisasi Instagram cookies: %s", exc)
 
 def _init_ytdl_proxy() -> None:
     global _YTDL_PROXY, _COBALT_API_KEY
@@ -117,6 +147,7 @@ def _init_ytdl_proxy() -> None:
     except Exception as exc:
         logger.warning("[social] Gagal inisialisasi proxy/cobalt config: %s", exc)
 
+_init_ig_cookie_file()
 _init_ytdl_proxy()
 _FB_UA            = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -537,14 +568,16 @@ def _cobalt_request(api_url: str, url: str) -> dict:
     Raise ValueError jika gagal (HTTP error, network error, dsb).
     """
     import time as _time
-    body = _json.dumps({"url": url, "videoQuality": "max", "filenameStyle": "basic"}).encode()
+    body = _json.dumps({"url": url, "videoQuality": "1080", "filenameStyle": "basic"}).encode()
     headers: dict = {
         "Accept":       "application/json",
         "Content-Type": "application/json",
         "User-Agent":   _COBALT_UA,
     }
     if _COBALT_API_KEY:
-        headers["X-Cobalt-API-Key"] = _COBALT_API_KEY
+        # Cobalt v7+ menggunakan "Authorization: Api-Key <token>"
+        # bukan header lama "X-Cobalt-API-Key"
+        headers["Authorization"] = f"Api-Key {_COBALT_API_KEY}"
 
     last_exc: Exception | None = None
     for _attempt in range(3):
@@ -768,95 +801,47 @@ def _extract_instagram_shortcode(url: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _instagram_embed_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
+def _ytdlp_instagram_cookies_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     """
-    Scrape halaman embed Instagram untuk mendapatkan URL media tanpa login.
-    Bekerja untuk post/reel publik.
-    Returns (title, list_of_file_paths).
+    Download Instagram via yt-dlp menggunakan cookies (INSTAGRAM_COOKIES env var).
+    Ini adalah strategi paling andal untuk konten yang memerlukan auth.
+    Hanya dijalankan jika _IG_COOKIE_FILE sudah diset.
     """
-    import re
+    if not _IG_COOKIE_FILE or not os.path.isfile(_IG_COOKIE_FILE):
+        raise ValueError("INSTAGRAM_COOKIES tidak diset — lewati strategi ini.")
 
-    shortcode = _extract_instagram_shortcode(url)
-    if not shortcode:
-        raise ValueError(f"Tidak dapat mengekstrak shortcode dari URL Instagram: {url}")
+    before = {str(p) for p in Path(work_dir).rglob("*") if p.is_file()}
+    opts = {
+        "outtmpl":              str(Path(work_dir) / "%(autonumber)03d_%(title).80s.%(ext)s"),
+        "format":               "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "merge_output_format":  "mp4",
+        "noplaylist":           not _is_instagram_carousel(url),
+        "quiet":                True,
+        "no_warnings":          True,
+        "no_color":             True,
+        "restrictfilenames":    True,
+        "writethumbnail":       False,
+        "writeinfojson":        False,
+        "socket_timeout":       20,
+        "retries":              3,
+        "fragment_retries":     3,
+        "cookiefile":           _IG_COOKIE_FILE,
+    }
+    if _YTDL_PROXY:
+        opts["proxy"] = _YTDL_PROXY
 
-    embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
-    _IG_UA = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    )
-    req = urllib.request.Request(
-        embed_url,
-        headers={
-            "User-Agent":      _IG_UA,
-            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer":         "https://www.instagram.com/",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        html = resp.read().decode("utf-8", errors="replace")
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
 
-    def _fetch(src: str, dest: str) -> None:
-        req2 = urllib.request.Request(src, headers={"User-Agent": _IG_UA, "Referer": "https://www.instagram.com/"})
-        with urllib.request.urlopen(req2, timeout=120) as r:
-            with open(dest, "wb") as f:
-                while True:
-                    chunk = r.read(512 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-
-    def _clean(raw: str) -> str:
-        return raw.replace("\\u0026", "&").replace("\\/", "/").replace("\\\\", "\\")
-
-    files: list[str] = []
-    title = "Instagram"
-
-    # Coba ekstrak judul dari caption
-    cap_m = re.search(r'"caption"\s*:\s*"((?:[^"\\]|\\.){0,300})"', html)
-    if cap_m:
-        title = cap_m.group(1).replace("\\n", " ").strip()[:160] or "Instagram"
-
-    # Coba video dulu
-    for pat in (
-        r'"video_url"\s*:\s*"((?:[^"\\]|\\.)+)"',
-        r'video_url\\?\":\\?\"((?:[^"\\]|\\.)+)',
-    ):
-        m = re.search(pat, html)
-        if m:
-            video_url = _clean(m.group(1))
-            dest = os.path.join(work_dir, "001_video.mp4")
-            try:
-                _fetch(video_url, dest)
-                files.append(dest)
-                logger.info("[social] instagram embed: video downloaded %d bytes", os.path.getsize(dest))
-            except Exception as exc:
-                logger.warning("[social] instagram embed: video fetch gagal: %s", exc)
-            break
-
-    # Kalau tidak ada video, coba gambar
+    title = (info or {}).get("title") or "Instagram"
+    files = [
+        str(p) for p in Path(work_dir).rglob("*")
+        if p.is_file() and str(p) not in before
+        and p.suffix.lower() not in _IGNORED_SUFFIXES
+    ]
     if not files:
-        for pat in (
-            r'"display_url"\s*:\s*"((?:[^"\\]|\\.)+)"',
-            r'display_url\\?\":\\?\"((?:[^"\\]|\\.)+)',
-        ):
-            m = re.search(pat, html)
-            if m:
-                img_url = _clean(m.group(1))
-                dest = os.path.join(work_dir, "001_image.jpg")
-                try:
-                    _fetch(img_url, dest)
-                    files.append(dest)
-                    logger.info("[social] instagram embed: image downloaded %d bytes", os.path.getsize(dest))
-                except Exception as exc:
-                    logger.warning("[social] instagram embed: image fetch gagal: %s", exc)
-                break
-
-    if not files:
-        raise ValueError("instagram-embed: tidak ada media yang ditemukan di halaman embed.")
-
+        raise ValueError("yt-dlp+cookies: tidak ada file yang terdownload dari Instagram.")
+    logger.info("[social] instagram yt-dlp+cookies berhasil: %d file", len(files))
     return title, sorted(files)
 
 
@@ -1271,19 +1256,23 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         logger.info("[social] Threads detected, using cobalt API: %s", url)
         return _cobalt_download_sync(url, work_dir)
 
-    # ── Instagram: cobalt → embed-scrape → instaloader → yt-dlp ─────────
-    # Urutan: cobalt paling andal tanpa auth; embed-scrape untuk publik;
-    # instaloader sering kena rate-limit/login di 2025+; yt-dlp last resort.
+    # ── Instagram: cobalt → yt-dlp+cookies → instaloader → yt-dlp ───────
+    # Perubahan 2025-2026:
+    # - cobalt v7+: wajib API key (Authorization: Api-Key), tanpa key → 401
+    # - embed-scrape: DIHAPUS — Instagram tidak lagi menyertakan video_url di HTML embed
+    # - yt-dlp+cookies: strategi paling andal jika INSTAGRAM_COOKIES diset
+    # - instaloader: sering kena login-required / rate-limit di 2025+
+    # - yt-dlp tanpa cookies: last resort, umumnya gagal untuk Reels
     _is_instagram = "instagram.com" in (urlparse(url).hostname or "").lower()
     if _is_instagram:
         logger.info("[social] Instagram detected: %s", url)
-        _ig_strategies = [
-            ("cobalt",        lambda d: _cobalt_download_sync(url, d)),
-            ("embed-scrape",  lambda d: _instagram_embed_sync(url, d)),
-            ("instaloader",   lambda d: _instaloader_sync(url, d)),
-            ("ytdlp",         lambda d: _ytdlp_instagram_sync(url, d, options)),
+        _ig_strategies: list[tuple[str, object]] = [
+            ("cobalt",          lambda d: _cobalt_download_sync(url, d)),
+            ("ytdlp-cookies",   lambda d: _ytdlp_instagram_cookies_sync(url, d)),
+            ("instaloader",     lambda d: _instaloader_sync(url, d)),
+            ("ytdlp",           lambda d: _ytdlp_instagram_sync(url, d, options)),
         ]
-        _ig_errors = []
+        _ig_errors: list[str] = []
         for _name, _fn in _ig_strategies:
             _sub = os.path.join(work_dir, _name)
             os.makedirs(_sub, exist_ok=True)
@@ -1298,8 +1287,9 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         logger.error("[social] Instagram: semua strategi gagal:\n%s", "\n".join(_ig_errors))
         raise ValueError(
             "❌ Gagal mendownload dari Instagram.\n"
-            "Kemungkinan konten bersifat privat atau memerlukan login.\n\n"
-            "<i>Hanya Reel/post publik yang bisa didownload.</i>"
+            "Instagram memerlukan autentikasi untuk download Reel/post.\n\n"
+            "<i>Solusi: Set variabel <b>COBALT_API_KEY</b> (dari cobalt.tools) "
+            "atau <b>INSTAGRAM_COOKIES</b> (cookies browser) di Railway Variables.</i>"
         )
 
     ytdlp_error_msg: str | None = None

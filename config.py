@@ -63,3 +63,10 @@ COBALT_API_KEY: str | None = os.getenv("COBALT_API_KEY") or None
 # Nama variabel HARUS "FAL_KEY" (dibaca otomatis oleh SDK fal-client).
 # Jika tidak diset, perintah /faceswap dan /imagine akan menampilkan pesan error.
 FAL_KEY: str | None = os.getenv("FAL_KEY") or None
+
+# Cookies Instagram untuk yt-dlp (Netscape format, opsional).
+# Cara mendapatkan: export cookies dari browser saat login Instagram
+# menggunakan ekstensi "Get cookies.txt LOCALLY", lalu paste isinya
+# ke Railway variable INSTAGRAM_COOKIES.
+# Tanpa ini, download Instagram Reel yang memerlukan auth akan gagal.
+INSTAGRAM_COOKIES: str | None = os.getenv("INSTAGRAM_COOKIES") or None
