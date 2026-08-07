@@ -6,7 +6,7 @@ import tempfile
 import urllib.request
 import json as _json
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import yt_dlp
 
@@ -583,7 +583,10 @@ def _cobalt_request(api_url: str, url: str) -> dict:
     for _attempt in range(3):
         try:
             req  = urllib.request.Request(api_url, data=body, headers=headers, method="POST")
-            resp = urllib.request.urlopen(req, timeout=30)
+            # This is only the metadata request. The media download below has
+            # its own longer timeout; keep this short so /get cannot appear
+            # stuck on an unavailable Cobalt instance.
+            resp = urllib.request.urlopen(req, timeout=15)
             return _json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             # Baca body error untuk diagnosa
@@ -799,6 +802,30 @@ def _extract_instagram_shortcode(url: str) -> str | None:
     import re
     m = re.search(r"/(?:p|reel|tv|reels)/([A-Za-z0-9_-]+)", url)
     return m.group(1) if m else None
+
+
+def _canonicalize_instagram_url(url: str) -> str:
+    """
+    Remove Instagram share/tracking parameters before handing a URL to a
+    downloader. Parameters such as ``igsh`` are not part of the media URL and
+    can make some Instagram extractors take a much slower fallback path.
+    """
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return url
+
+    hostname = (parsed.hostname or "").lower()
+    if not hostname.endswith("instagram.com"):
+        return url
+
+    return urlunsplit((
+        parsed.scheme or "https",
+        parsed.netloc.lower(),
+        parsed.path.rstrip("/") or "/",
+        "",
+        "",
+    ))
 
 
 def _ytdlp_instagram_cookies_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
@@ -1265,13 +1292,25 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     # - yt-dlp tanpa cookies: last resort, umumnya gagal untuk Reels
     _is_instagram = "instagram.com" in (urlparse(url).hostname or "").lower()
     if _is_instagram:
-        logger.info("[social] Instagram detected: %s", url)
-        _ig_strategies: list[tuple[str, object]] = [
-            ("cobalt",          lambda d: _cobalt_download_sync(url, d)),
-            ("ytdlp-cookies",   lambda d: _ytdlp_instagram_cookies_sync(url, d)),
-            ("instaloader",     lambda d: _instaloader_sync(url, d)),
-            ("ytdlp",           lambda d: _ytdlp_instagram_sync(url, d, options)),
-        ]
+        canonical_url = _canonicalize_instagram_url(url)
+        logger.info(
+            "[social] Instagram detected: %s (canonical: %s)",
+            url,
+            canonical_url,
+        )
+
+        # api.cobalt.tools requires an API key. Skip it entirely when the
+        # optional key is not configured instead of retrying a guaranteed 401.
+        _ig_strategies: list[tuple[str, object]] = []
+        if _COBALT_API_KEY:
+            _ig_strategies.append(
+                ("cobalt", lambda d: _cobalt_download_sync(canonical_url, d))
+            )
+        _ig_strategies.extend([
+            ("ytdlp-cookies", lambda d: _ytdlp_instagram_cookies_sync(canonical_url, d)),
+            ("instaloader", lambda d: _instaloader_sync(canonical_url, d)),
+            ("ytdlp", lambda d: _ytdlp_instagram_sync(canonical_url, d, options)),
+        ])
         _ig_errors: list[str] = []
         for _name, _fn in _ig_strategies:
             _sub = os.path.join(work_dir, _name)
