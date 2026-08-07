@@ -161,6 +161,7 @@ _YOUTUBE_DOMAINS  = {"youtube.com", "youtu.be", "www.youtube.com", "m.youtube.co
 
 _TEMP_ROOT = "downloads"
 _IGNORED_SUFFIXES = {".part", ".ytdl", ".json", ".description", ".jpg.part"}
+_STREAM_URL_METADATA = ".stream_urls.json"
 
 # yt-dlp errors that clearly mean "no downloadable media in this content"
 _NO_MEDIA_PHRASES = (
@@ -674,6 +675,7 @@ def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         return content_type
 
     files: list[str] = []
+    stream_urls: list[str] = []
 
     # "tunnel" dan "stream": download langsung dari URL yang diberikan cobalt.
     # "redirect": URL final dari platform — download langsung.
@@ -682,6 +684,7 @@ def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         dl_url = data.get("url")
         if not dl_url:
             raise ValueError("❌ Tidak ada link download yang tersedia.")
+        stream_urls.append(dl_url)
         # Download dulu ke file sementara, lalu rename sesuai Content-Type
         tmp = os.path.join(work_dir, "001_media.tmp")
         ct  = _dl(dl_url, tmp)
@@ -700,6 +703,7 @@ def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
             item_type = item.get("type", "video")
             if not item_url:
                 continue
+            stream_urls.append(item_url)
             ext  = "jpg" if item_type == "photo" else "mp4"
             dest = os.path.join(work_dir, f"{i:03d}_{item_type}.{ext}")
             try:
@@ -718,6 +722,7 @@ def _cobalt_download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
             "Pastikan link masih aktif dan bersifat publik."
         )
 
+    _save_stream_urls(work_dir, {"entries": [{"url": url} for url in stream_urls]})
     return "Facebook/Threads", sorted(files)
 
 
@@ -804,6 +809,72 @@ def _extract_instagram_shortcode(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _stream_urls_from_info(info: dict | None) -> list[str]:
+    """Collect direct media URLs selected by yt-dlp for a post or carousel."""
+    if not info:
+        return []
+
+    entries = info.get("entries")
+    if entries:
+        candidates = [entry for entry in entries if entry]
+    else:
+        candidates = [info]
+
+    urls: list[str] = []
+    for entry in candidates:
+        if not isinstance(entry, dict):
+            continue
+        # Prefer the final selected format. For Instagram this is normally a
+        # progressive MP4 that can be opened directly in a mobile browser.
+        entry_candidates = [entry]
+        entry_candidates.extend(entry.get("requested_downloads") or [])
+        selected_url = None
+        fallback_url = None
+        for candidate in entry_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_url = candidate.get("url")
+            if not candidate_url or not candidate_url.startswith(("http://", "https://")):
+                continue
+            fallback_url = fallback_url or candidate_url
+            if candidate.get("vcodec", "none") != "none" and candidate.get("acodec", "none") != "none":
+                selected_url = candidate_url
+                break
+        if selected_url or fallback_url:
+            urls.append(selected_url or fallback_url)
+
+    return list(dict.fromkeys(urls))
+
+
+def _save_stream_urls(work_dir: str, info: dict | None) -> None:
+    """Persist expiring CDN URLs beside downloaded files for Telegram fallback."""
+    urls = _stream_urls_from_info(info)
+    if not urls:
+        return
+    metadata_path = os.path.join(work_dir, _STREAM_URL_METADATA)
+    try:
+        with open(metadata_path, "w", encoding="utf-8") as metadata:
+            _json.dump({"urls": urls}, metadata)
+    except OSError as exc:
+        logger.warning("[social] gagal menyimpan URL streaming: %s", exc)
+
+
+def get_stream_urls(work_dir: str) -> list[str]:
+    """Read direct media URLs saved by a successful downloader strategy."""
+    urls: list[str] = []
+    for metadata_path in Path(work_dir).rglob(_STREAM_URL_METADATA):
+        try:
+            with open(metadata_path, encoding="utf-8") as metadata:
+                data = _json.load(metadata)
+            urls.extend(
+                url for url in data.get("urls", [])
+                if isinstance(url, str) and url.startswith(("http://", "https://"))
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("[social] gagal membaca URL streaming: %s", exc)
+    return list(dict.fromkeys(urls))
+
+
 def _canonicalize_instagram_url(url: str) -> str:
     """
     Remove Instagram share/tracking parameters before handing a URL to a
@@ -868,6 +939,7 @@ def _ytdlp_instagram_cookies_sync(url: str, work_dir: str) -> tuple[str, list[st
     ]
     if not files:
         raise ValueError("yt-dlp+cookies: tidak ada file yang terdownload dari Instagram.")
+    _save_stream_urls(work_dir, info)
     logger.info("[social] instagram yt-dlp+cookies berhasil: %d file", len(files))
     return title, sorted(files)
 
@@ -963,6 +1035,7 @@ def _ytdlp_instagram_sync(url: str, work_dir: str, base_options: dict) -> tuple[
     ]
     if not files:
         raise ValueError("yt-dlp: tidak ada file yang terdownload dari Instagram.")
+    _save_stream_urls(work_dir, info)
     return title, sorted(files)
 
 

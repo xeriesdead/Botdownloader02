@@ -13,6 +13,7 @@ from modules.link_parser import parse_telegram_link, is_public_chat
 from modules.social_downloader import (
     cleanup_download,
     download_public_media,
+    get_stream_urls,
     is_social_link,
 )
 from modules.quota_service import QuotaService
@@ -171,10 +172,41 @@ def setup(app):
                     max_size = 50 * 1024 * 1024
                     oversized = [path for path in files if os.path.getsize(path) > max_size]
                     if oversized:
+                        stream_urls = get_stream_urls(work_dir)
+                        if stream_urls:
+                            buttons = [
+                                [
+                                    InlineKeyboardButton(
+                                        f"📥 Tonton / Download {idx}",
+                                        url=stream_url,
+                                    )
+                                ]
+                                for idx, stream_url in enumerate(stream_urls, 1)
+                            ]
+                            await bot.send_message(
+                                chat_id=chat_id,
+                                text=(
+                                    "⚠️ Video terlalu besar untuk diunggah langsung ke Telegram.\n\n"
+                                    "Gunakan tombol di bawah untuk menonton atau mengunduh "
+                                    "video langsung dari Instagram."
+                                ),
+                                reply_markup=InlineKeyboardMarkup(buttons),
+                            )
+                            activity_log(uid, "social_stream", title[:180])
+                            quota = QuotaService.get_quota(uid)
+                            quota_display = "∞ Unlimited" if quota.get("unlimited") else str(quota["total"])
+                            await edit(
+                                "✅ <b>Link streaming siap!</b>\n"
+                                f"📦 Sisa quota: <b>{quota_display}</b>",
+                                )
+                            await _quota_warn(bot, chat_id, uid)
+                            return
+
                         refund_quota()
                         await edit(
-                            "❌ File terlalu besar untuk dikirim langsung oleh bot.\n"
-                            "Coba gunakan video dengan kualitas lebih rendah."
+                            "❌ Video terlalu besar untuk dikirim langsung oleh Telegram "
+                            "dan URL streaming tidak tersedia.\n"
+                            "Coba lagi atau perbarui INSTAGRAM_COOKIES."
                         )
                         return
 
