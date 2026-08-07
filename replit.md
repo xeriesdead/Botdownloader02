@@ -29,6 +29,8 @@ A Python Telegram bot with file forwarding, premium subscriptions, user quota ma
 | `MAX_FILE_SIZE_MB_PREMIUM` | 2048 | File size limit for premium users (MB) |
 | `QUOTA_WARN_THRESHOLD` | 2 | Remaining quota that triggers a warning |
 | `YOUTUBE_COOKIES` | — | Netscape-format cookies for yt-dlp |
+| `INSTAGRAM_COOKIES` | — | Netscape-format cookies for Instagram yt-dlp |
+| `COBALT_API_KEY` | — | Optional Cobalt fallback for Instagram/Threads |
 | `WEBHOOK_SECRET` | — | Webhook path secret (webhook mode only) |
 | `TASKS_SECRET` | — | Header secret for scheduled task endpoints |
 

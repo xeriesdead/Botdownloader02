@@ -1283,7 +1283,7 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         logger.info("[social] Threads detected, using cobalt API: %s", url)
         return _cobalt_download_sync(url, work_dir)
 
-    # ── Instagram: cobalt → yt-dlp+cookies → instaloader → yt-dlp ───────
+    # ── Instagram: yt-dlp+cookies → cobalt → instaloader → yt-dlp ───────
     # Perubahan 2025-2026:
     # - cobalt v7+: wajib API key (Authorization: Api-Key), tanpa key → 401
     # - embed-scrape: DIHAPUS — Instagram tidak lagi menyertakan video_url di HTML embed
@@ -1299,15 +1299,19 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
             canonical_url,
         )
 
-        # api.cobalt.tools requires an API key. Skip it entirely when the
-        # optional key is not configured instead of retrying a guaranteed 401.
+        # Prefer the configured Instagram cookies. Cobalt is only an optional
+        # fallback when its API key is present; without the key, its public
+        # endpoint rejects requests before any media can be resolved.
         _ig_strategies: list[tuple[str, object]] = []
+        if _IG_COOKIE_FILE:
+            _ig_strategies.append(
+                ("ytdlp-cookies", lambda d: _ytdlp_instagram_cookies_sync(canonical_url, d))
+            )
         if _COBALT_API_KEY:
             _ig_strategies.append(
                 ("cobalt", lambda d: _cobalt_download_sync(canonical_url, d))
             )
         _ig_strategies.extend([
-            ("ytdlp-cookies", lambda d: _ytdlp_instagram_cookies_sync(canonical_url, d)),
             ("instaloader", lambda d: _instaloader_sync(canonical_url, d)),
             ("ytdlp", lambda d: _ytdlp_instagram_sync(canonical_url, d, options)),
         ])
@@ -1327,8 +1331,8 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
         raise ValueError(
             "❌ Gagal mendownload dari Instagram.\n"
             "Instagram memerlukan autentikasi untuk download Reel/post.\n\n"
-            "<i>Solusi: Set variabel <b>COBALT_API_KEY</b> (dari cobalt.tools) "
-            "atau <b>INSTAGRAM_COOKIES</b> (cookies browser) di Railway Variables.</i>"
+            "<i>Solusi: perbarui <b>INSTAGRAM_COOKIES</b> "
+            "(cookies browser format Netscape) di Railway Variables.</i>"
         )
 
     ytdlp_error_msg: str | None = None
