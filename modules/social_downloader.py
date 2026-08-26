@@ -240,13 +240,12 @@ def _is_twitter_link(url: str) -> bool:
 
 
 def _is_instagram_carousel(url: str) -> bool:
+    """Return True only for regular posts, not single-item Reel URLs."""
     try:
         path = (urlparse(url).path or "").lower()
     except ValueError:
         return False
-    return "instagram.com" in (urlparse(url).netloc or "").lower() and (
-        "/p/" in path or "/reel/" in path
-    )
+    return "instagram.com" in (urlparse(url).netloc or "").lower() and "/p/" in path
 
 
 def _classify_ytdlp_error(message: str) -> str:
