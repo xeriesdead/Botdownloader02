@@ -1,2 +1,3 @@
 - [Railway native Python builds](railway-native-builds.md) — use the project Dockerfile when dependencies require compiled native extensions such as tgcrypto.
 - [Instagram CDN fallback](instagram-stream-fallback.md) — preserve direct media URLs before cleaning temporary downloads when Telegram cannot upload oversized videos.
+- [Instagram extraction isolation](instagram-extraction-isolation.md) — blocking extractor calls need a killable process because cancelling an asyncio thread does not stop network I/O.
