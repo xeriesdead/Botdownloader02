@@ -975,39 +975,29 @@ def _instaloader_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     _socket.setdefaulttimeout(20)
 
     try:
-        # Gunakan custom context agar bisa set request_timeout dan user agent
-        try:
-            ctx = instaloader.InstaloaderContext(
-                sleep=False,
-                quiet=True,
-                request_timeout=20,
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-            )
-        except TypeError:
-            # Versi instaloader lama tidak kenal semua parameter — fallback ke default.
-            # Socket timeout di atas tetap aktif sebagai jaring pengaman.
-            ctx = instaloader.InstaloaderContext(sleep=False, quiet=True)
-
+        # Instaloader menerima request_timeout dan user_agent langsung.
+        # Jangan meneruskan InstaloaderContext lewat `context`: versi
+        # Instaloader yang tersedia di Railway tidak memiliki parameter itu.
         L = instaloader.Instaloader(
+            sleep=False,
+            quiet=True,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            request_timeout=20,
             download_video_thumbnails=False,
             save_metadata=False,
             post_metadata_txt_pattern="",
-            quiet=True,
             dirname_pattern=work_dir,
             filename_pattern="{shortcode}_{media_number:02}",
-            context=ctx,
         )
 
         try:
             post = instaloader.Post.from_shortcode(L.context, shortcode)
         except instaloader.exceptions.LoginRequiredException:
             raise ValueError("instaloader: konten ini memerlukan login Instagram.")
-        except instaloader.exceptions.QueryReturnedBadContentException as exc:
-            raise ValueError(f"instaloader: Instagram menolak request (rate limit / bot detection): {exc}")
         except instaloader.exceptions.InstaloaderException as exc:
             raise ValueError(f"instaloader: {exc}")
 
