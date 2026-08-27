@@ -1,5 +1,7 @@
 import asyncio
+import multiprocessing
 import os
+import queue as _queue
 import shutil
 import subprocess
 import tempfile
@@ -246,6 +248,14 @@ def _is_instagram_carousel(url: str) -> bool:
     except ValueError:
         return False
     return "instagram.com" in (urlparse(url).netloc or "").lower() and "/p/" in path
+
+
+def _is_instagram_link(url: str) -> bool:
+    try:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return hostname == "instagram.com" or hostname.endswith(".instagram.com")
 
 
 def _classify_ytdlp_error(message: str) -> str:
@@ -1436,6 +1446,72 @@ def _download_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
     return title, sorted(downloaded)
 
 
+def _download_process_entry(
+    url: str,
+    work_dir: str,
+    result_queue,
+) -> None:
+    """Run a social download in an isolated process so it can be terminated."""
+    try:
+        title, files = _download_sync(url, work_dir)
+        result_queue.put(("ok", title, files))
+    except BaseException as exc:
+        # Exceptions from third-party extractors are not always pickleable.
+        # Send only a plain message back to the parent process.
+        result_queue.put(("error", str(exc) or exc.__class__.__name__))
+
+
+async def _download_with_hard_timeout(
+    url: str,
+    work_dir: str,
+    timeout: int = 90,
+) -> tuple[str, list[str]]:
+    """
+    Run an Instagram download in a killable child process.
+
+    asyncio.to_thread() cannot stop a blocking third-party network call after
+    its timeout. A child process can be terminated, which prevents one stuck
+    Instagram request from keeping the queue worker busy indefinitely.
+    """
+    try:
+        context = multiprocessing.get_context("fork")
+    except ValueError:
+        context = multiprocessing.get_context()
+
+    result_queue = context.Queue()
+    process = context.Process(
+        target=_download_process_entry,
+        args=(url, work_dir, result_queue),
+        daemon=True,
+    )
+    process.start()
+
+    try:
+        deadline = asyncio.get_running_loop().time() + timeout
+        result = None
+        while result is None:
+            try:
+                result = result_queue.get_nowait()
+            except _queue.Empty:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise ValueError(
+                        "❌ Instagram terlalu lama merespons dan proses dihentikan (>90 detik).\n"
+                        "Pastikan Reel masih publik, lalu coba lagi."
+                    )
+                await asyncio.sleep(0.2)
+
+        if not result or result[0] != "ok":
+            detail = result[1] if len(result) > 1 else "unknown error"
+            raise ValueError(detail)
+        return result[1], result[2]
+    finally:
+        if process.is_alive():
+            process.terminate()
+        process.join(timeout=5)
+        result_queue.close()
+        result_queue.join_thread()
+
+
 async def download_public_media(url: str, user_id: int) -> tuple[str, list[str], str]:
     """
     Download public social media without cookies or account credentials.
@@ -1447,10 +1523,13 @@ async def download_public_media(url: str, user_id: int) -> tuple[str, list[str],
     os.makedirs(_TEMP_ROOT, exist_ok=True)
     work_dir = tempfile.mkdtemp(prefix=f"social_{user_id}_", dir=_TEMP_ROOT)
     try:
-        title, files = await asyncio.wait_for(
-            asyncio.to_thread(_download_sync, url, work_dir),
-            timeout=90,
-        )
+        if _is_instagram_link(url):
+            title, files = await _download_with_hard_timeout(url, work_dir)
+        else:
+            title, files = await asyncio.wait_for(
+                asyncio.to_thread(_download_sync, url, work_dir),
+                timeout=90,
+            )
         return title, files, work_dir
     except asyncio.TimeoutError:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -1468,12 +1547,15 @@ async def download_public_media(url: str, user_id: int) -> tuple[str, list[str],
             logger.info("[social] transient error, retrying once in 3s: %s", exc)
             await asyncio.sleep(3)
             try:
-                # PENTING: retry HARUS dibungkus wait_for — tanpa ini,
-                # jika thread hang maka bot stuck selamanya sampai JOB_TIMEOUT.
-                title, files = await asyncio.wait_for(
-                    asyncio.to_thread(_download_sync, url, work_dir),
-                    timeout=90,
-                )
+                # Instagram memakai child process agar network call yang macet
+                # dapat dihentikan; platform lain tetap memakai thread timeout.
+                if _is_instagram_link(url):
+                    title, files = await _download_with_hard_timeout(url, work_dir)
+                else:
+                    title, files = await asyncio.wait_for(
+                        asyncio.to_thread(_download_sync, url, work_dir),
+                        timeout=90,
+                    )
                 return title, files, work_dir
             except asyncio.TimeoutError:
                 shutil.rmtree(work_dir, ignore_errors=True)
