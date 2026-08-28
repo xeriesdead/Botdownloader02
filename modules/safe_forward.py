@@ -1,6 +1,8 @@
 import asyncio
 import os
 import random
+import subprocess
+import tempfile
 import time
 from pyrogram.errors import (
     FloodWait,
@@ -66,6 +68,11 @@ _forwards_restricted_cache: dict[str, bool] = {}
 
 # Minimum ukuran file agar progress bar ditampilkan (10 MB)
 _PROGRESS_MIN_BYTES = 10 * 1024 * 1024
+
+# Telegram menerima thumbnail video dalam bentuk JPEG kecil. Gunakan frame
+# setelah pembukaan video agar thumbnail tidak sering berupa frame hitam.
+_THUMBNAIL_MAX_SECONDS = 5.0
+_THUMBNAIL_MAX_BYTES = 200 * 1024
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -302,6 +309,133 @@ def _fmt_size(size_bytes: int) -> str:
     return f"{size_bytes / 1024 / 1024 / 1024:.2f} GB"
 
 
+def _probe_video_timestamp(path: str) -> float:
+    """Pilih timestamp thumbnail yang aman, termasuk untuk video pendek."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        duration = float(result.stdout.strip())
+        if duration > 0:
+            return min(max(duration * 0.15, 0.5), _THUMBNAIL_MAX_SECONDS)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return 1.0
+
+
+def _create_video_thumbnail(path: str) -> str | None:
+    """
+    Buat thumbnail JPEG sementara untuk video.
+
+    Return None jika video tidak dapat dibaca. Kegagalan thumbnail tidak boleh
+    menggagalkan upload video utama.
+    """
+    thumb_fd, thumb_path = tempfile.mkstemp(prefix="bot-thumb-", suffix=".jpg")
+    os.close(thumb_fd)
+    timestamp = _probe_video_timestamp(path)
+
+    commands = (
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{timestamp:.3f}", "-i", path,
+            "-frames:v", "1",
+            "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+            "-q:v", "8",
+            thumb_path,
+        ],
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", path, "-frames:v", "1",
+            "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+            "-q:v", "8",
+            thumb_path,
+        ],
+    )
+
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            thumb_size = os.path.getsize(thumb_path)
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+        if result.returncode == 0 and 0 < thumb_size <= _THUMBNAIL_MAX_BYTES:
+            return thumb_path
+
+        if result.returncode == 0 and thumb_size > _THUMBNAIL_MAX_BYTES:
+            compact_fd, compact_path = tempfile.mkstemp(
+                prefix="bot-thumb-small-", suffix=".jpg"
+            )
+            os.close(compact_fd)
+            try:
+                compact_result = subprocess.run(
+                    [
+                        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                        "-i", thumb_path, "-frames:v", "1",
+                        "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+                        "-q:v", "12", compact_path,
+                    ],
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+                compact_size = os.path.getsize(compact_path)
+                if (
+                    compact_result.returncode == 0
+                    and 0 < compact_size <= _THUMBNAIL_MAX_BYTES
+                ):
+                    os.remove(thumb_path)
+                    os.replace(compact_path, thumb_path)
+                    return thumb_path
+            except (OSError, subprocess.SubprocessError):
+                pass
+            finally:
+                if os.path.exists(compact_path):
+                    try:
+                        os.remove(compact_path)
+                    except OSError:
+                        pass
+
+    try:
+        os.remove(thumb_path)
+    except OSError:
+        pass
+    return None
+
+
+async def _create_video_thumbnail_async(path: str) -> str | None:
+    """Jalankan FFmpeg di thread agar event loop bot tidak terblokir."""
+    return await asyncio.to_thread(_create_video_thumbnail, path)
+
+
+def _video_metadata(msg) -> dict:
+    """Ambil metadata video dari pesan sumber untuk preview Telegram."""
+    video = getattr(msg, "video", None)
+    if not video:
+        return {}
+    metadata = {}
+    for key in ("duration", "width", "height"):
+        value = getattr(video, key, None)
+        if value:
+            metadata[key] = value
+    return metadata
+
+
 async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                                      on_progress=None):
     """
@@ -327,6 +461,10 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
         raise RuntimeError("Download gagal, file tidak tersedia.")
 
     caption = _build_caption(msg.caption or "")
+    thumbnail_path = (
+        await _create_video_thumbnail_async(path) if msg.video else None
+    )
+    metadata = _video_metadata(msg)
     _kw = dict(
         write_timeout=_PTB_WRITE_TIMEOUT,
         read_timeout=_PTB_READ_TIMEOUT,
@@ -341,10 +479,32 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                 )
         elif msg.video:
             with open(path, "rb") as f:
-                await asyncio.wait_for(
-                    bot.send_video(user_chat_id, video=f, caption=caption, **_kw),
-                    timeout=_UPLOAD_TIMEOUT,
-                )
+                if thumbnail_path:
+                    with open(thumbnail_path, "rb") as thumb:
+                        await asyncio.wait_for(
+                            bot.send_video(
+                                user_chat_id,
+                                video=f,
+                                caption=caption,
+                                thumbnail=thumb,
+                                supports_streaming=True,
+                                **metadata,
+                                **_kw,
+                            ),
+                            timeout=_UPLOAD_TIMEOUT,
+                        )
+                else:
+                    await asyncio.wait_for(
+                        bot.send_video(
+                            user_chat_id,
+                            video=f,
+                            caption=caption,
+                            supports_streaming=True,
+                            **metadata,
+                            **_kw,
+                        ),
+                        timeout=_UPLOAD_TIMEOUT,
+                    )
         elif msg.audio:
             with open(path, "rb") as f:
                 await asyncio.wait_for(
@@ -386,6 +546,11 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
             os.remove(path)
         except Exception:
             pass
+        if thumbnail_path:
+            try:
+                os.remove(thumbnail_path)
+            except Exception:
+                pass
 
 
 async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
@@ -398,7 +563,9 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
     msgs  = await client.get_media_group(chat, msg_id)
     total = len(msgs)
     paths: list[str]    = []
+    thumbnail_paths: list[str] = []
     handles: list       = []
+    thumbnail_handles: list = []
     media_items         = []
 
     try:
@@ -453,7 +620,29 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             if m.photo:
                 media_items.append(InputMediaPhoto(media=f, caption=caption))
             elif m.video:
-                media_items.append(InputMediaVideo(media=f, caption=caption))
+                thumb_path = await _create_video_thumbnail_async(path)
+                if thumb_path:
+                    thumbnail_paths.append(thumb_path)
+                    thumb = open(thumb_path, "rb")
+                    thumbnail_handles.append(thumb)
+                    media_items.append(
+                        InputMediaVideo(
+                            media=f,
+                            caption=caption,
+                            thumbnail=thumb,
+                            supports_streaming=True,
+                            **_video_metadata(m),
+                        )
+                    )
+                else:
+                    media_items.append(
+                        InputMediaVideo(
+                            media=f,
+                            caption=caption,
+                            supports_streaming=True,
+                            **_video_metadata(m),
+                        )
+                    )
             elif m.audio:
                 media_items.append(InputMediaAudio(media=f, caption=caption))
             elif m.animation:
@@ -490,7 +679,17 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 f.close()
             except Exception:
                 pass
+        for f in thumbnail_handles:
+            try:
+                f.close()
+            except Exception:
+                pass
         for p in paths:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        for p in thumbnail_paths:
             try:
                 os.remove(p)
             except Exception:
@@ -535,6 +734,10 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
 
     ul_cb = _make_pyrogram_progress(on_progress, "Mengirim", file_size) if show_progress else None
     caption = _build_caption(msg.caption or "")
+    thumbnail_path = (
+        await _create_video_thumbnail_async(path) if msg.video else None
+    )
+    metadata = _video_metadata(msg)
     try:
         if msg.photo:
             await asyncio.wait_for(
@@ -543,8 +746,15 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
             )
         elif msg.video:
             await asyncio.wait_for(
-                client.send_video(bot_peer, path, caption=caption,
-                                  supports_streaming=True, progress=ul_cb),
+                client.send_video(
+                    bot_peer,
+                    path,
+                    caption=caption,
+                    supports_streaming=True,
+                    thumb=thumbnail_path,
+                    progress=ul_cb,
+                    **metadata,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
             )
         elif msg.audio:
@@ -582,6 +792,11 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
             os.remove(path)
         except Exception:
             pass
+        if thumbnail_path:
+            try:
+                os.remove(thumbnail_path)
+            except Exception:
+                pass
 
 
 async def _send_album_item(
@@ -591,83 +806,121 @@ async def _send_album_item(
     caption = _build_caption(msg.caption or "")
     file_size = _get_file_size(msg) or 0
     bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+    thumbnail_path = (
+        await _create_video_thumbnail_async(path) if msg.video else None
+    )
+    metadata = _video_metadata(msg)
     _kw = dict(
         write_timeout=_PTB_WRITE_TIMEOUT,
         read_timeout=_PTB_READ_TIMEOUT,
         connect_timeout=_PTB_CONNECT_TIMEOUT,
     )
 
-    if file_size > _BOT_API_UPLOAD_LIMIT:
-        if msg.photo:
-            await asyncio.wait_for(
-                client.send_photo(bot_peer, path, caption=caption),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        elif msg.video:
-            await asyncio.wait_for(
-                client.send_video(
-                    bot_peer, path, caption=caption, supports_streaming=True
-                ),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        elif msg.audio:
-            await asyncio.wait_for(
-                client.send_audio(bot_peer, path, caption=caption),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        elif msg.voice:
-            await asyncio.wait_for(
-                client.send_voice(bot_peer, path, caption=caption),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        elif msg.video_note:
-            await asyncio.wait_for(
-                client.send_video_note(bot_peer, path),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        elif msg.animation:
-            await asyncio.wait_for(
-                client.send_animation(bot_peer, path, caption=caption),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        else:
-            await asyncio.wait_for(
-                client.send_document(bot_peer, path, caption=caption),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        return
+    try:
+        if file_size > _BOT_API_UPLOAD_LIMIT:
+            if msg.photo:
+                await asyncio.wait_for(
+                    client.send_photo(bot_peer, path, caption=caption),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+            elif msg.video:
+                await asyncio.wait_for(
+                    client.send_video(
+                        bot_peer,
+                        path,
+                        caption=caption,
+                        supports_streaming=True,
+                        thumb=thumbnail_path,
+                        **metadata,
+                    ),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+            elif msg.audio:
+                await asyncio.wait_for(
+                    client.send_audio(bot_peer, path, caption=caption),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+            elif msg.voice:
+                await asyncio.wait_for(
+                    client.send_voice(bot_peer, path, caption=caption),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+            elif msg.video_note:
+                await asyncio.wait_for(
+                    client.send_video_note(bot_peer, path),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+            elif msg.animation:
+                await asyncio.wait_for(
+                    client.send_animation(bot_peer, path, caption=caption),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+            else:
+                await asyncio.wait_for(
+                    client.send_document(bot_peer, path, caption=caption),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+            return
 
-    with open(path, "rb") as f:
-        if msg.photo:
-            await asyncio.wait_for(
-                bot.send_photo(user_chat_id, photo=f, caption=caption, **_kw),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        elif msg.video:
-            await asyncio.wait_for(
-                bot.send_video(user_chat_id, video=f, caption=caption, **_kw),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        elif msg.audio:
-            await asyncio.wait_for(
-                bot.send_audio(user_chat_id, audio=f, caption=caption, **_kw),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        elif msg.voice:
-            await asyncio.wait_for(
-                bot.send_voice(user_chat_id, voice=f, caption=caption, **_kw),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        elif msg.animation:
-            await asyncio.wait_for(
-                bot.send_animation(user_chat_id, animation=f, caption=caption, **_kw),
-                timeout=_UPLOAD_TIMEOUT,
-            )
-        else:
-            await asyncio.wait_for(
-                bot.send_document(user_chat_id, document=f, caption=caption, **_kw),
-                timeout=_UPLOAD_TIMEOUT,
-            )
+        with open(path, "rb") as f:
+            if msg.photo:
+                await asyncio.wait_for(
+                    bot.send_photo(user_chat_id, photo=f, caption=caption, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+            elif msg.video:
+                if thumbnail_path:
+                    with open(thumbnail_path, "rb") as thumb:
+                        await asyncio.wait_for(
+                            bot.send_video(
+                                user_chat_id,
+                                video=f,
+                                caption=caption,
+                                thumbnail=thumb,
+                                supports_streaming=True,
+                                **metadata,
+                                **_kw,
+                            ),
+                            timeout=_UPLOAD_TIMEOUT,
+                        )
+                else:
+                    await asyncio.wait_for(
+                        bot.send_video(
+                            user_chat_id,
+                            video=f,
+                            caption=caption,
+                            supports_streaming=True,
+                            **metadata,
+                            **_kw,
+                        ),
+                        timeout=_UPLOAD_TIMEOUT,
+                    )
+            elif msg.audio:
+                await asyncio.wait_for(
+                    bot.send_audio(user_chat_id, audio=f, caption=caption, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+            elif msg.voice:
+                await asyncio.wait_for(
+                    bot.send_voice(user_chat_id, voice=f, caption=caption, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+            elif msg.animation:
+                await asyncio.wait_for(
+                    bot.send_animation(user_chat_id, animation=f, caption=caption, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+            else:
+                await asyncio.wait_for(
+                    bot.send_document(user_chat_id, document=f, caption=caption, **_kw),
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+    finally:
+        if thumbnail_path:
+            try:
+                os.remove(thumbnail_path)
+            except Exception:
+                pass
 
 
 async def _send_album_individually(
