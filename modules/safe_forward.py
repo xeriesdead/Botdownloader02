@@ -270,6 +270,30 @@ def _get_file_size(msg) -> int | None:
     return None
 
 
+def _album_download_target(msg, user_chat_id: int, album_msg_id: int,
+                           item_index: int) -> str:
+    """Buat nama file unik agar item album tidak saling menimpa."""
+    if msg.photo:
+        extension = ".jpg"
+    elif msg.video or msg.animation or msg.video_note:
+        extension = ".mp4"
+    elif msg.audio:
+        extension = ".mp3"
+    elif msg.voice:
+        extension = ".ogg"
+    elif msg.sticker:
+        extension = ".webp"
+    else:
+        document_name = getattr(getattr(msg, "document", None), "file_name", "")
+        extension = os.path.splitext(document_name or "")[1][:10] or ".bin"
+
+    os.makedirs("downloads", exist_ok=True)
+    return os.path.join(
+        "downloads",
+        f"album_{user_chat_id}_{album_msg_id}_{item_index}_{msg.id}{extension}",
+    )
+
+
 def _fmt_size(size_bytes: int) -> str:
     if size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.1f} KB"
@@ -398,14 +422,18 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 except Exception:
                     pass
             path = None
+            target = _album_download_target(m, user_chat_id, msg_id, i + 1)
             for _dl_attempt in range(2):
                 try:
                     path = await asyncio.wait_for(
-                        client.download_media(m, progress=dl_cb),
+                        client.download_media(
+                            m, file_name=target, progress=dl_cb
+                        ),
                         timeout=dl_timeout,
                     )
-                    if path:
+                    if path and os.path.isfile(path) and os.path.getsize(path) > 0:
                         break
+                    path = None
                 except (asyncio.TimeoutError, Exception) as _dl_err:
                     logger.warning(
                         f"Download album item {i + 1}/{total} msg {m.id} "
@@ -682,14 +710,18 @@ async def _send_album_individually(
             except Exception:
                 pass
         path = None
+        target = _album_download_target(m, user_chat_id, msg_id, i + 1)
         for _dl_attempt in range(2):
             try:
                 path = await asyncio.wait_for(
-                    client.download_media(m, progress=dl_cb),
+                    client.download_media(
+                        m, file_name=target, progress=dl_cb
+                    ),
                     timeout=dl_timeout,
                 )
-                if path:
+                if path and os.path.isfile(path) and os.path.getsize(path) > 0:
                     break
+                path = None
             except (asyncio.TimeoutError, Exception) as _dl_err:
                 logger.warning(
                     f"Download album item {i + 1}/{total} msg {m.id} "
