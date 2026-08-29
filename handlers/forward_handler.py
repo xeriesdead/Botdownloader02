@@ -422,16 +422,40 @@ def setup(app):
 
             async def _edit_s(text: str, html: bool = False):
                 try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=pmsg_id,
-                        text=text,
-                        parse_mode=ParseMode.HTML if html else None,
+                    await asyncio.wait_for(
+                        bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=pmsg_id,
+                            text=text,
+                            parse_mode=ParseMode.HTML if html else None,
+                            write_timeout=10,
+                            read_timeout=10,
+                            connect_timeout=10,
+                        ),
+                        timeout=15,
                     )
-                except TgBadRequest:
+                except Exception:
+                    # Status update tidak boleh menghentikan proses download.
                     pass
 
+            last_progress = [time.monotonic()]
+
             async def single_job():
+                async def _heartbeat():
+                    try:
+                        while True:
+                            await asyncio.sleep(20)
+                            if time.monotonic() - last_progress[0] >= 20:
+                                await _edit_s(
+                                    "⏳ <b>Masih memproses download...</b>\n"
+                                    "<i>Koneksi Telegram sedang lambat, bot belum berhenti.</i>",
+                                    html=True,
+                                )
+                                last_progress[0] = time.monotonic()
+                    except asyncio.CancelledError:
+                        raise
+
+                heartbeat = asyncio.create_task(_heartbeat())
                 try:
                     # Tampilkan "Memulai" sebelum tunggu lock — bisa ada job lain yang sedang pegang lock
                     await _edit_s(
@@ -440,6 +464,7 @@ def setup(app):
                     )
 
                     async def _progress(text: str):
+                        last_progress[0] = time.monotonic()
                         await _edit_s(text, html=True)
 
                     async with lock:
@@ -492,6 +517,9 @@ def setup(app):
                     logger.error(f"get single job error uid={uid}: {e}", exc_info=True)
                     QuotaService.add_quota(uid, 1)
                     await _edit_s(f"❌ Terjadi kesalahan tak terduga: {e}")
+                finally:
+                    heartbeat.cancel()
+                    await asyncio.gather(heartbeat, return_exceptions=True)
 
             pos = queue_manager.add_job(single_job, is_prem, uid)
             if pos == 0:
@@ -583,16 +611,38 @@ def setup(app):
 
             async def _edit_b(text: str):
                 try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=pmsg_id,
-                        text=text,
-                        parse_mode=ParseMode.HTML,
+                    await asyncio.wait_for(
+                        bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=pmsg_id,
+                            text=text,
+                            parse_mode=ParseMode.HTML,
+                            write_timeout=10,
+                            read_timeout=10,
+                            connect_timeout=10,
+                        ),
+                        timeout=15,
                     )
-                except TgBadRequest:
+                except Exception:
                     pass
 
+            last_progress = [time.monotonic()]
+
             async def bulk_job():
+                async def _heartbeat():
+                    try:
+                        while True:
+                            await asyncio.sleep(20)
+                            if time.monotonic() - last_progress[0] >= 20:
+                                await _edit_b(
+                                    "⏳ <b>Masih memproses download...</b>\n"
+                                    "<i>Koneksi Telegram sedang lambat, bot belum berhenti.</i>"
+                                )
+                                last_progress[0] = time.monotonic()
+                    except asyncio.CancelledError:
+                        raise
+
+                heartbeat = asyncio.create_task(_heartbeat())
                 try:
                     await _edit_b(
                         f"⏳ <b>Mengunduh {count} pesan... (0/{count})</b>\n"
@@ -610,6 +660,10 @@ def setup(app):
                             )
                             await _edit_b(message)
                             return
+
+                        async def _progress(text: str):
+                            last_progress[0] = time.monotonic()
+                            await _edit_b(text)
 
                         # Fetch semua pesan sekaligus
                         all_ids  = list(range(msg_a, msg_b + 1))
@@ -654,11 +708,13 @@ def setup(app):
                                     continue
                                 seen_group_ids.add(msg.media_group_id)
                                 ok, reason = await SafeForward.run_album(
-                                    uc, bot, chat_id, chat_a, msg.id
+                                    uc, bot, chat_id, chat_a, msg.id,
+                                    on_progress=_progress,
                                 )
                             else:
                                 ok, reason = await SafeForward.run(
                                     uc, bot, chat_id, chat_a, msg.id,
+                                    on_progress=_progress,
                                     is_premium=is_prem,
                                 )
 
@@ -765,6 +821,9 @@ def setup(app):
                     logger.error(f"get bulk job error uid={uid}: {e}", exc_info=True)
                     QuotaService.add_quota(uid, count)
                     await _edit_b(f"❌ Terjadi kesalahan tak terduga: {e}")
+                finally:
+                    heartbeat.cancel()
+                    await asyncio.gather(heartbeat, return_exceptions=True)
 
             pos = queue_manager.add_job(bulk_job, is_prem, uid)
             if pos == 0:
