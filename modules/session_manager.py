@@ -13,6 +13,7 @@ class SessionManager:
         self._locks: dict[int, asyncio.Lock] = {}
         self._public_session: Client | None = None
         self._public_lock = asyncio.Lock()
+        self._public_start_timeout = 30
 
     def _lock(self, user_id: int) -> asyncio.Lock:
         if user_id not in self._locks:
@@ -75,7 +76,10 @@ class SessionManager:
                     bot_token=BOT_TOKEN,
                     in_memory=True,
                 )
-                await client.start()
+                await asyncio.wait_for(
+                    client.start(),
+                    timeout=self._public_start_timeout,
+                )
                 self._public_session = client
                 logger.info("Public Telegram session started")
                 return client

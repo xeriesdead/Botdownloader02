@@ -7,7 +7,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest as TgBadRequest, TimedOut, NetworkError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from modules.queue_manager import queue_manager
+from modules.queue_manager import queue_manager, JOB_TIMEOUT
 from modules.session_manager import session_manager
 from modules.link_parser import parse_telegram_link, is_public_chat
 from modules.social_downloader import (
@@ -49,6 +49,13 @@ _LINK_INVALID_TEXT = (
     "Format yang didukung:\n"
     "• <code>https://t.me/username/123</code>\n"
     "• <code>https://t.me/c/1234567890/123</code>"
+)
+
+_SESSION_LOOKUP_TIMEOUT = 35
+_LOCK_WAIT_TIMEOUT = 30
+_SINGLE_JOB_TIMEOUT = max(
+    60,
+    JOB_TIMEOUT - _SESSION_LOOKUP_TIMEOUT - _LOCK_WAIT_TIMEOUT - 5,
 )
 
 
@@ -392,7 +399,16 @@ def setup(app):
                 )
 
             # ── Pre-flight: cek akses channel SEBELUM potong quota ────────
-            uc_check = await session_manager.get_for_chat(uid, chat)
+            try:
+                uc_check = await asyncio.wait_for(
+                    session_manager.get_for_chat(uid, chat),
+                    timeout=_SESSION_LOOKUP_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                return await update.message.reply_text(
+                    "⏱️ Bot timeout saat menghubungkan ke channel publik.\n"
+                    "Coba lagi beberapa saat lagi."
+                )
             if uc_check:
                 ok_access, err_access = await check_channel_access(uc_check, chat)
                 if not ok_access:
@@ -434,9 +450,8 @@ def setup(app):
                         ),
                         timeout=15,
                     )
-                except Exception:
-                    # Status update tidak boleh menghentikan proses download.
-                    pass
+                except Exception as exc:
+                    logger.debug("Gagal update status message %s: %s", pmsg_id, exc)
 
             last_progress = [time.monotonic()]
 
@@ -467,14 +482,28 @@ def setup(app):
                         last_progress[0] = time.monotonic()
                         await _edit_s(text, html=True)
 
-                    async with lock:
+                    lock_acquired = False
+                    try:
+                        await asyncio.wait_for(lock.acquire(), timeout=_LOCK_WAIT_TIMEOUT)
+                        lock_acquired = True
+                    except asyncio.TimeoutError:
+                        QuotaService.add_quota(uid, 1)
+                        await _edit_s(
+                            "⏳ Masih ada proses download lain yang berjalan.\n"
+                            "Quota dikembalikan. Coba lagi setelah proses sebelumnya selesai."
+                        )
+                        return
+
+                    try:
+                        uc = await asyncio.wait_for(
+                            session_manager.get_for_chat(uid, chat),
+                            timeout=_SESSION_LOOKUP_TIMEOUT,
+                        )
                         # Baru di sini proses benar-benar berjalan
                         await _edit_s(
                             f"⏳ <b>Sedang mengunduh...</b>\n📦 Sisa quota: <b>{quota_disp}</b>",
                             html=True,
                         )
-
-                        uc = await session_manager.get_for_chat(uid, chat)
                         if not uc:
                             QuotaService.add_quota(uid, 1)
                             message = (
@@ -484,11 +513,22 @@ def setup(app):
                             )
                             await _edit_s(message)
                             return
-                        ok, reason = await SafeForward.run(
-                            uc, bot, chat_id, chat, msg_id,
-                            on_progress=_progress,
-                            is_premium=is_prem,
-                        )
+                        try:
+                            ok, reason = await asyncio.wait_for(
+                                SafeForward.run(
+                                    uc, bot, chat_id, chat, msg_id,
+                                    on_progress=_progress,
+                                    is_premium=is_prem,
+                                ),
+                                timeout=_SINGLE_JOB_TIMEOUT,
+                            )
+                        except asyncio.TimeoutError:
+                            QuotaService.add_quota(uid, 1)
+                            await _edit_s(
+                                "⏱️ Download timeout setelah beberapa menit.\n"
+                                "Quota dikembalikan. Coba lagi dengan link yang sama."
+                            )
+                            return
                         if not ok:
                             QuotaService.add_quota(uid, 1)
                             await _edit_s(f"❌ Gagal: {reason}")
@@ -501,6 +541,9 @@ def setup(app):
                                 html=True,
                             )
                             await _quota_warn(bot, chat_id, uid)
+                    finally:
+                        if lock_acquired:
+                            lock.release()
                 except asyncio.CancelledError:
                     # Job dibatalkan oleh queue (timeout global) — beri tahu user
                     QuotaService.add_quota(uid, 1)

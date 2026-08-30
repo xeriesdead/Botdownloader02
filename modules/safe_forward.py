@@ -181,6 +181,16 @@ _PTB_READ_TIMEOUT    = 60    # detik
 _PTB_CONNECT_TIMEOUT = 15    # detik
 
 
+async def _notify_progress(on_progress, text: str):
+    """Kirim status fase tanpa membuat download gagal jika Telegram sedang timeout."""
+    if not on_progress:
+        return
+    try:
+        await on_progress(text)
+    except Exception:
+        pass
+
+
 async def check_channel_access(client, chat) -> tuple[bool, str]:
     """
     Pre-flight: cek apakah client bisa mengakses channel/grup.
@@ -1057,11 +1067,13 @@ class SafeForward:
         on_progress: async callable(text: str) untuk update status (opsional).
         Return (True, None) jika berhasil, (False, alasan) jika gagal.
         """
+        await _notify_progress(on_progress, "🔌 <b>Menghubungkan ke channel...</b>")
         _, src_err = await _resolve_source(client, chat)
         if src_err:
             return False, src_err
 
         # ── Deteksi noforwards sebelum mencoba forward/copy ───────────────
+        await _notify_progress(on_progress, "🔎 <b>Memeriksa akses media...</b>")
         if await _is_forwards_restricted(client, chat):
             return await _send_album_individually(
                 client, bot, chat, msg_id, user_chat_id, on_progress=on_progress
@@ -1069,6 +1081,7 @@ class SafeForward:
 
         for attempt in range(MAX_RETRIES + 1):
             try:
+                await _notify_progress(on_progress, "📥 <b>Mengambil album...</b>")
                 await _send_album_via_bot(
                     client, bot, chat, msg_id, user_chat_id, on_progress=on_progress
                 )
@@ -1137,14 +1150,17 @@ class SafeForward:
         on_progress: async callable(text: str) untuk update progress ke user (opsional).
         """
         # ── Langkah 1: Pastikan source bisa diakses ──────────────────────
+        await _notify_progress(on_progress, "🔌 <b>Menghubungkan ke channel...</b>")
         _, src_err = await _resolve_source(client, chat)
         if src_err:
             return False, src_err
 
         # ── Deteksi noforwards sebelum fetch pesan ────────────────────────
+        await _notify_progress(on_progress, "🔎 <b>Memeriksa akses media...</b>")
         is_restricted = await _is_forwards_restricted(client, chat)
 
         # ── Langkah 2: Ambil pesan ───────────────────────────────────────
+        await _notify_progress(on_progress, "📥 <b>Mengambil pesan dari channel...</b>")
         try:
             msg = await asyncio.wait_for(
                 client.get_messages(chat, msg_id), timeout=_MSG_FETCH_TIMEOUT
