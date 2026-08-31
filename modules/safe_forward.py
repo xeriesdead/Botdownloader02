@@ -20,6 +20,8 @@ from pyrogram.errors import (
     ChatForwardsRestricted,
     FileReferenceExpired,
 )
+from pyrogram import raw
+from pyrogram.types import Message
 from telegram import (
     InputMediaAnimation,
     InputMediaAudio,
@@ -349,6 +351,74 @@ async def _resolve_source(client, chat) -> tuple[object | None, str | None]:
     except Exception as e:
         logger.warning(f"get_chat({chat}) error: {e}")
         return None, f"Gagal mengakses channel: {e}"
+
+
+async def _get_message_via_raw_api(client, chat, msg_id: int):
+    """
+    Ambil satu pesan lewat raw MTProto API.
+
+    Pada beberapa koneksi/channel, wrapper Pyrogram get_messages() dapat
+    berhenti setelah peer berhasil di-resolve. Raw channels.getMessages /
+    messages.getMessages menghindari lookup wrapper tersebut.
+    """
+    peer = await asyncio.wait_for(
+        client.resolve_peer(chat), timeout=_PEER_RESOLVE_TIMEOUT
+    )
+    message_id = raw.types.InputMessageID(id=msg_id)
+
+    if isinstance(peer, raw.types.InputPeerChannel):
+        result = await asyncio.wait_for(
+            client.invoke(
+                raw.functions.channels.GetMessages(
+                    channel=peer,
+                    id=[message_id],
+                )
+            ),
+            timeout=_MSG_FETCH_TIMEOUT,
+        )
+    else:
+        result = await asyncio.wait_for(
+            client.invoke(
+                raw.functions.messages.GetMessages(
+                    id=[message_id],
+                )
+            ),
+            timeout=_MSG_FETCH_TIMEOUT,
+        )
+
+    messages = getattr(result, "messages", None) or []
+    if not messages:
+        return None
+
+    parsed = Message._parse(
+        client,
+        messages[0],
+        getattr(result, "users", None) or [],
+        getattr(result, "chats", None) or [],
+    )
+    if hasattr(parsed, "__await__"):
+        parsed = await parsed
+    return parsed
+
+
+async def _get_message(client, chat, msg_id: int):
+    """Ambil pesan dengan raw API dan fallback wrapper untuk kompatibilitas."""
+    try:
+        return await _get_message_via_raw_api(client, chat, msg_id)
+    except asyncio.TimeoutError:
+        raise
+    except (MessageIdInvalid, MsgIdInvalid):
+        raise
+    except _PEER_ERRORS:
+        raise
+    except Exception as raw_error:
+        logger.warning(
+            "Raw get message gagal untuk %s/%s, coba wrapper Pyrogram: %s",
+            chat, msg_id, raw_error,
+        )
+        return await asyncio.wait_for(
+            client.get_messages(chat, msg_id), timeout=_MSG_FETCH_TIMEOUT
+        )
 
 
 def _get_file_size(msg) -> int | None:
@@ -1254,9 +1324,7 @@ class SafeForward:
         # ── Langkah 2: Ambil pesan ───────────────────────────────────────
         await _notify_progress(on_progress, "📥 <b>Mengambil pesan dari channel...</b>")
         try:
-            msg = await asyncio.wait_for(
-                client.get_messages(source_chat, msg_id), timeout=_MSG_FETCH_TIMEOUT
-            )
+            msg = await _get_message(client, source_chat, msg_id)
         except asyncio.TimeoutError:
             logger.warning(f"Timeout get_messages({source_chat}, {msg_id})")
             return False, (
