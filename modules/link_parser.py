@@ -1,7 +1,8 @@
 import re
+from urllib.parse import urlparse
 
-_PRIVATE = re.compile(r"(?:t\.me|telegram\.me)/c/(\d+)/(\d+)")
-_PUBLIC  = re.compile(r"(?:t\.me|telegram\.me)/([A-Za-z0-9_]+)/(\d+)")
+_HOST = re.compile(r"^(?:www\.)?(?:t\.me|telegram\.me)$", re.IGNORECASE)
+_USERNAME = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def parse_telegram_link(link: str):
@@ -13,17 +14,40 @@ def parse_telegram_link(link: str):
 
     Format yang didukung (domain t.me maupun telegram.me):
       t.me/username/123              → public, msg 123
+      t.me/username/4/123?single     → public topic, msg 123
       t.me/c/1234567890/123         → private, msg 123
+      t.me/c/1234567890/4/123       → private topic, msg 123
       telegram.me/username/123      → public, msg 123
       telegram.me/c/1234567890/123  → private, msg 123
     """
-    m = _PRIVATE.search(link)
-    if m:
-        return int(f"-100{m.group(1)}"), int(m.group(2))
+    raw = (link or "").strip()
+    if not raw:
+        return None, None
 
-    m = _PUBLIC.search(link)
-    if m:
-        return f"@{m.group(1)}", int(m.group(2))
+    # urlparse treats "t.me/..." as a path, so add a scheme for schemeless
+    # links while still accepting the https:// form sent by Telegram.
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    if not _HOST.fullmatch(parsed.netloc):
+        return None, None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 2:
+        return None, None
+
+    # Topic/thread links contain an extra numeric segment. Telegram's actual
+    # message ID is always the final path segment before the query string.
+    message_part = parts[-1]
+    if not message_part.isdigit():
+        return None, None
+    msg_id = int(message_part)
+
+    if parts[0].lower() == "c":
+        if len(parts) < 3 or not parts[1].isdigit():
+            return None, None
+        return int(f"-100{parts[1]}"), msg_id
+
+    if _USERNAME.fullmatch(parts[0]) and all(part.isdigit() for part in parts[1:]):
+        return f"@{parts[0]}", msg_id
 
     return None, None
 
