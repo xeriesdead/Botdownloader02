@@ -1150,6 +1150,40 @@ class SafeForward:
           • Fallback >50 MB restricted: tidak bisa dikirim (Bot API limit)
         on_progress: async callable(text: str) untuk update progress ke user (opsional).
         """
+        # ── Jalur cepat untuk channel publik ──────────────────────────────
+        # Bot API dapat menyalin pesan publik tanpa mengambilnya terlebih
+        # dahulu lewat Pyrogram. Ini menghindari get_messages() yang dapat
+        # menunggu terlalu lama pada koneksi server tertentu.
+        if isinstance(chat, str) and chat.startswith("@"):
+            await _notify_progress(
+                on_progress, "📤 <b>Mengirim pesan dari channel publik...</b>"
+            )
+            try:
+                await asyncio.wait_for(
+                    bot.copy_message(
+                        chat_id=user_chat_id,
+                        from_chat_id=chat,
+                        message_id=msg_id,
+                        write_timeout=_PTB_WRITE_TIMEOUT,
+                        read_timeout=_PTB_READ_TIMEOUT,
+                        connect_timeout=_PTB_CONNECT_TIMEOUT,
+                    ),
+                    timeout=_BOT_COPY_TIMEOUT,
+                )
+                return True, None
+            except asyncio.TimeoutError:
+                logger.warning("Timeout copy_message(%s, %s)", chat, msg_id)
+            except (BadRequest, Forbidden) as exc:
+                logger.info(
+                    "copy_message(%s, %s) tidak tersedia, gunakan fallback: %s",
+                    chat, msg_id, exc,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "copy_message(%s, %s) gagal, gunakan fallback: %s",
+                    chat, msg_id, exc,
+                )
+
         # ── Langkah 1: Pastikan source bisa diakses ──────────────────────
         await _notify_progress(on_progress, "🔌 <b>Menghubungkan ke channel...</b>")
         _, src_err = await _resolve_source(client, chat)
