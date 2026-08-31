@@ -323,15 +323,18 @@ async def _is_forwards_restricted(client, chat) -> bool:
 
 
 async def _resolve_source(client, chat) -> tuple[object | None, str | None]:
-    """Resolve source peer. Return (peer, None) atau (None, error_msg)."""
+    """Resolve source chat. Return a stable numeric chat ID when available."""
     label = chat if isinstance(chat, str) else f"ID {chat}"
     try:
-        peer = await asyncio.wait_for(
-            client.resolve_peer(chat), timeout=_PEER_RESOLVE_TIMEOUT
+        chat_obj = await asyncio.wait_for(
+            client.get_chat(chat), timeout=_PEER_RESOLVE_TIMEOUT
         )
-        return peer, None
+        # get_messages() with a username can trigger a second username lookup
+        # in Pyrogram. Reuse Telegram's numeric ID to avoid that network path.
+        stable_chat = getattr(chat_obj, "id", None) or chat
+        return stable_chat, None
     except asyncio.TimeoutError:
-        logger.warning(f"Timeout resolve_peer({chat})")
+        logger.warning(f"Timeout get_chat({chat})")
         return None, (
             f"❌ Tidak bisa mengakses channel (timeout).\n"
             "Pastikan akun sudah bergabung ke channel tersebut."
@@ -344,8 +347,8 @@ async def _resolve_source(client, chat) -> tuple[object | None, str | None]:
             "Pastikan akun yang login sudah bergabung ke channel/grup tersebut."
         )
     except Exception as e:
-        logger.warning(f"resolve_peer({chat}) error: {e}")
-        return None, f"Gagal resolve peer: {e}"
+        logger.warning(f"get_chat({chat}) error: {e}")
+        return None, f"Gagal mengakses channel: {e}"
 
 
 def _get_file_size(msg) -> int | None:
@@ -1141,7 +1144,7 @@ class SafeForward:
         Return (True, None) jika berhasil, (False, alasan) jika gagal.
         """
         await _notify_progress(on_progress, "🔌 <b>Menghubungkan ke channel...</b>")
-        _, src_err = await _resolve_source(client, chat)
+        source_chat, src_err = await _resolve_source(client, chat)
         if src_err:
             return False, src_err
 
@@ -1252,10 +1255,10 @@ class SafeForward:
         await _notify_progress(on_progress, "📥 <b>Mengambil pesan dari channel...</b>")
         try:
             msg = await asyncio.wait_for(
-                client.get_messages(chat, msg_id), timeout=_MSG_FETCH_TIMEOUT
+                client.get_messages(source_chat, msg_id), timeout=_MSG_FETCH_TIMEOUT
             )
         except asyncio.TimeoutError:
-            logger.warning(f"Timeout get_messages({chat}, {msg_id})")
+            logger.warning(f"Timeout get_messages({source_chat}, {msg_id})")
             return False, (
                 "❌ Tidak bisa mengambil pesan (timeout).\n"
                 "Pastikan akun sudah bergabung ke channel tersebut."
@@ -1268,7 +1271,7 @@ class SafeForward:
                 "Pastikan akun yang login sudah bergabung ke channel/grup tersebut."
             )
         except Exception as e:
-            logger.warning(f"get_messages({chat}, {msg_id}) error: {e}")
+            logger.warning(f"get_messages({source_chat}, {msg_id}) error: {e}")
             return False, f"Gagal mengambil pesan: {e}"
 
         if not msg or msg.empty:
