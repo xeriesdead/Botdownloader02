@@ -499,6 +499,7 @@ def setup(app):
                         return
 
                     try:
+                        public_copy_failed = False
                         if is_public_chat(chat):
                             copied = await copy_public_message(
                                 bot, chat_id, chat, msg_id, on_progress=_progress
@@ -513,13 +514,22 @@ def setup(app):
                                 )
                                 await _quota_warn(bot, chat_id, uid)
                                 return
+                            public_copy_failed = True
                             await _edit_s(
                                 "🔄 Jalur langsung tidak tersedia, mencoba metode cadangan...",
                                 html=True,
                             )
 
+                        # Jika Bot API tidak dapat membaca channel publik, jangan
+                        # memulai Pyrogram bot session yang bisa macet di start().
+                        # Gunakan session user yang sudah login sebagai fallback.
+                        session_lookup = (
+                            session_manager.get(uid)
+                            if public_copy_failed
+                            else session_manager.get_for_chat(uid, chat)
+                        )
                         uc = await asyncio.wait_for(
-                            session_manager.get_for_chat(uid, chat),
+                            session_lookup,
                             timeout=_SESSION_LOOKUP_TIMEOUT,
                         )
                         # Baru di sini proses benar-benar berjalan
@@ -530,7 +540,8 @@ def setup(app):
                         if not uc:
                             QuotaService.add_quota(uid, 1)
                             message = (
-                                "❌ Bot tidak bisa mengakses channel publik ini."
+                                "❌ Bot API tidak bisa membaca channel publik ini.\n"
+                                "Gunakan /login agar bot dapat mencoba session Telegram kamu."
                                 if is_public_chat(chat)
                                 else "❌ Session tidak valid. Silakan /login ulang."
                             )
@@ -542,6 +553,7 @@ def setup(app):
                                     uc, bot, chat_id, chat, msg_id,
                                     on_progress=_progress,
                                     is_premium=is_prem,
+                                    skip_public_copy=public_copy_failed,
                                 ),
                                 timeout=_SINGLE_JOB_TIMEOUT,
                             )
