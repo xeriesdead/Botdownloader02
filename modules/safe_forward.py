@@ -174,6 +174,7 @@ _ACCESS_CHECK_TIMEOUT  = 12   # detik — batas waktu pre-flight cek akses chann
 _DOWNLOAD_TIMEOUT      = 120  # detik — batas waktu download satu file via Pyrogram (2 menit)
 _UPLOAD_TIMEOUT        = 300  # detik — batas waktu upload satu file ke Bot API (5 menit)
 _ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file — dipakai di _send_album_via_bot
+_BOT_COPY_TIMEOUT      = 30   # detik — jalur cepat untuk pesan channel publik
 
 # Timeout PTB untuk operasi upload ke Bot API
 _PTB_WRITE_TIMEOUT   = 90    # detik
