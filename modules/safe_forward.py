@@ -192,6 +192,44 @@ async def _notify_progress(on_progress, text: str):
         pass
 
 
+async def copy_public_message(
+    bot, user_chat_id: int, chat, msg_id: int, on_progress=None,
+) -> bool:
+    """Salin pesan publik langsung lewat Bot API tanpa memakai Pyrogram."""
+    if not isinstance(chat, str) or not chat.startswith("@"):
+        return False
+
+    await _notify_progress(
+        on_progress, "📤 <b>Mengirim pesan dari channel publik...</b>"
+    )
+    try:
+        await asyncio.wait_for(
+            bot.copy_message(
+                chat_id=user_chat_id,
+                from_chat_id=chat,
+                message_id=msg_id,
+                write_timeout=_PTB_WRITE_TIMEOUT,
+                read_timeout=_PTB_READ_TIMEOUT,
+                connect_timeout=_PTB_CONNECT_TIMEOUT,
+            ),
+            timeout=_BOT_COPY_TIMEOUT,
+        )
+        return True
+    except asyncio.TimeoutError:
+        logger.warning("Timeout copy_message(%s, %s)", chat, msg_id)
+    except (BadRequest, Forbidden) as exc:
+        logger.info(
+            "copy_message(%s, %s) tidak tersedia, gunakan fallback: %s",
+            chat, msg_id, exc,
+        )
+    except Exception as exc:
+        logger.warning(
+            "copy_message(%s, %s) gagal, gunakan fallback: %s",
+            chat, msg_id, exc,
+        )
+    return False
+
+
 async def check_channel_access(client, chat) -> tuple[bool, str]:
     """
     Pre-flight: cek apakah client bisa mengakses channel/grup.
@@ -1155,34 +1193,15 @@ class SafeForward:
         # dahulu lewat Pyrogram. Ini menghindari get_messages() yang dapat
         # menunggu terlalu lama pada koneksi server tertentu.
         if isinstance(chat, str) and chat.startswith("@"):
-            await _notify_progress(
-                on_progress, "📤 <b>Mengirim pesan dari channel publik...</b>"
-            )
             try:
-                await asyncio.wait_for(
-                    bot.copy_message(
-                        chat_id=user_chat_id,
-                        from_chat_id=chat,
-                        message_id=msg_id,
-                        write_timeout=_PTB_WRITE_TIMEOUT,
-                        read_timeout=_PTB_READ_TIMEOUT,
-                        connect_timeout=_PTB_CONNECT_TIMEOUT,
-                    ),
-                    timeout=_BOT_COPY_TIMEOUT,
-                )
-                return True, None
-            except asyncio.TimeoutError:
-                logger.warning("Timeout copy_message(%s, %s)", chat, msg_id)
-            except (BadRequest, Forbidden) as exc:
-                logger.info(
-                    "copy_message(%s, %s) tidak tersedia, gunakan fallback: %s",
-                    chat, msg_id, exc,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "copy_message(%s, %s) gagal, gunakan fallback: %s",
-                    chat, msg_id, exc,
-                )
+                if await copy_public_message(
+                    bot, user_chat_id, chat, msg_id, on_progress=on_progress
+                ):
+                    return True, None
+            except Exception:
+                # copy_public_message already logs expected failures; retain
+                # the Pyrogram fallback for unexpected integration errors.
+                logger.exception("Public message copy helper failed for %s/%s", chat, msg_id)
 
         # ── Langkah 1: Pastikan source bisa diakses ──────────────────────
         await _notify_progress(on_progress, "🔌 <b>Menghubungkan ke channel...</b>")
