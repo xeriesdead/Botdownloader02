@@ -17,7 +17,7 @@ from modules.social_downloader import (
     is_social_link,
 )
 from modules.quota_service import QuotaService
-from modules.safe_forward import SafeForward, check_channel_access
+from modules.safe_forward import SafeForward, check_channel_access, copy_public_message
 from modules.channel_guard import require_member
 from modules.activity_log import log as activity_log
 from database.db import db
@@ -399,20 +399,24 @@ def setup(app):
                 )
 
             # ── Pre-flight: cek akses channel SEBELUM potong quota ────────
-            try:
-                uc_check = await asyncio.wait_for(
-                    session_manager.get_for_chat(uid, chat),
-                    timeout=_SESSION_LOOKUP_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                return await update.message.reply_text(
-                    "⏱️ Bot timeout saat menghubungkan ke channel publik.\n"
-                    "Coba lagi beberapa saat lagi."
-                )
-            if uc_check:
-                ok_access, err_access = await check_channel_access(uc_check, chat)
-                if not ok_access:
-                    return await update.message.reply_text(err_access, parse_mode=ParseMode.HTML)
+            # Channel publik akan dicoba langsung lewat Bot API di dalam job.
+            # Jangan menunggu session Pyrogram di sini karena lookup itulah
+            # yang dapat membuat request publik terlihat macet.
+            if not is_public_chat(chat):
+                try:
+                    uc_check = await asyncio.wait_for(
+                        session_manager.get_for_chat(uid, chat),
+                        timeout=_SESSION_LOOKUP_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    return await update.message.reply_text(
+                        "⏱️ Bot timeout saat menghubungkan ke channel.\n"
+                        "Coba lagi beberapa saat lagi."
+                    )
+                if uc_check:
+                    ok_access, err_access = await check_channel_access(uc_check, chat)
+                    if not ok_access:
+                        return await update.message.reply_text(err_access, parse_mode=ParseMode.HTML)
 
             if not QuotaService.use_quota(uid):
                 return await update.message.reply_text(
@@ -495,6 +499,25 @@ def setup(app):
                         return
 
                     try:
+                        if is_public_chat(chat):
+                            copied = await copy_public_message(
+                                bot, chat_id, chat, msg_id, on_progress=_progress
+                            )
+                            if copied:
+                                activity_log(uid, "download", f"{chat}/{msg_id}")
+                                q_after = QuotaService.get_quota(uid)
+                                qd = "∞ Unlimited" if q_after.get("unlimited") else str(q_after["total"])
+                                await _edit_s(
+                                    f"✅ Terkirim!\n📦 Sisa quota: <b>{qd}</b>",
+                                    html=True,
+                                )
+                                await _quota_warn(bot, chat_id, uid)
+                                return
+                            await _edit_s(
+                                "🔄 Jalur langsung tidak tersedia, mencoba metode cadangan...",
+                                html=True,
+                            )
+
                         uc = await asyncio.wait_for(
                             session_manager.get_for_chat(uid, chat),
                             timeout=_SESSION_LOOKUP_TIMEOUT,
