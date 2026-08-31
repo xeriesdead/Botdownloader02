@@ -195,12 +195,12 @@ async def _notify_progress(on_progress, text: str):
 async def copy_public_message(
     bot, user_chat_id: int, chat, msg_id: int, on_progress=None,
 ) -> bool:
-    """Salin pesan publik langsung lewat Bot API tanpa memakai Pyrogram."""
+    """Pindahkan pesan publik lewat Bot API tanpa mengunduh media ke Railway."""
     if not isinstance(chat, str) or not chat.startswith("@"):
         return False
 
     await _notify_progress(
-        on_progress, "📤 <b>Mengirim pesan dari channel publik...</b>"
+        on_progress, "📤 <b>Menyalin pesan dari channel publik...</b>"
     )
     try:
         await asyncio.wait_for(
@@ -216,15 +216,49 @@ async def copy_public_message(
         )
         return True
     except asyncio.TimeoutError:
+        # Jangan langsung mencoba metode kedua setelah timeout: Telegram
+        # mungkin sudah menerima copy request dan retry dapat membuat duplikat.
         logger.warning("Timeout copy_message(%s, %s)", chat, msg_id)
+        return False
     except (BadRequest, Forbidden) as exc:
         logger.info(
-            "copy_message(%s, %s) tidak tersedia, gunakan fallback: %s",
+            "copy_message(%s, %s) tidak tersedia: %s",
             chat, msg_id, exc,
         )
     except Exception as exc:
         logger.warning(
-            "copy_message(%s, %s) gagal, gunakan fallback: %s",
+            "copy_message(%s, %s) gagal: %s",
+            chat, msg_id, exc,
+        )
+
+    # Beberapa pesan/media publik ditolak oleh copyMessage tetapi masih bisa
+    # diteruskan lewat forwardMessage. Ini juga tidak memakai download lokal.
+    await _notify_progress(
+        on_progress, "📤 <b>Meneruskan media besar tanpa download ulang...</b>"
+    )
+    try:
+        await asyncio.wait_for(
+            bot.forward_message(
+                chat_id=user_chat_id,
+                from_chat_id=chat,
+                message_id=msg_id,
+                write_timeout=_PTB_WRITE_TIMEOUT,
+                read_timeout=_PTB_READ_TIMEOUT,
+                connect_timeout=_PTB_CONNECT_TIMEOUT,
+            ),
+            timeout=_BOT_COPY_TIMEOUT,
+        )
+        return True
+    except asyncio.TimeoutError:
+        logger.warning("Timeout forward_message(%s, %s)", chat, msg_id)
+    except (BadRequest, Forbidden) as exc:
+        logger.info(
+            "forward_message(%s, %s) tidak tersedia, gunakan fallback: %s",
+            chat, msg_id, exc,
+        )
+    except Exception as exc:
+        logger.warning(
+            "forward_message(%s, %s) gagal, gunakan fallback: %s",
             chat, msg_id, exc,
         )
     return False
