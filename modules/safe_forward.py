@@ -1176,6 +1176,7 @@ class SafeForward:
         client, bot, user_chat_id: int, chat, msg_id: int,
         on_progress=None,
         is_premium: bool = False,
+        skip_public_copy: bool = False,
     ) -> tuple[bool, str | None]:
         """
         Ambil pesan dari `chat`/`msg_id` dan kirim ke `user_chat_id` via PTB bot.
@@ -1192,7 +1193,7 @@ class SafeForward:
         # Bot API dapat menyalin pesan publik tanpa mengambilnya terlebih
         # dahulu lewat Pyrogram. Ini menghindari get_messages() yang dapat
         # menunggu terlalu lama pada koneksi server tertentu.
-        if isinstance(chat, str) and chat.startswith("@"):
+        if not skip_public_copy and isinstance(chat, str) and chat.startswith("@"):
             try:
                 if await copy_public_message(
                     bot, user_chat_id, chat, msg_id, on_progress=on_progress
