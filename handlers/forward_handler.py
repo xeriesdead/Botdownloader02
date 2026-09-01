@@ -53,6 +53,7 @@ _LINK_INVALID_TEXT = (
 
 _SESSION_LOOKUP_TIMEOUT = 35
 _LOCK_WAIT_TIMEOUT = 30
+_BULK_FETCH_TIMEOUT = 30
 _SINGLE_JOB_TIMEOUT = max(
     60,
     JOB_TIMEOUT - _SESSION_LOOKUP_TIMEOUT - _LOCK_WAIT_TIMEOUT - 5,
@@ -751,11 +752,25 @@ def setup(app):
                             await _edit_b(text)
 
                         # Fetch semua pesan sekaligus
+                        try:
+                            bulk_chat_obj = await asyncio.wait_for(
+                                uc.get_chat(chat_a),
+                                timeout=_BULK_FETCH_TIMEOUT,
+                            )
+                            bulk_source_chat = getattr(bulk_chat_obj, "id", None) or chat_a
+                        except asyncio.TimeoutError:
+                            raise RuntimeError(
+                                "Timeout saat mengakses channel untuk mengambil pesan."
+                            )
+
                         all_ids  = list(range(msg_a, msg_b + 1))
                         all_msgs = []
                         for i in range(0, len(all_ids), 200):
                             chunk   = all_ids[i : i + 200]
-                            fetched = await uc.get_messages(chat_a, chunk)
+                            fetched = await asyncio.wait_for(
+                                uc.get_messages(bulk_source_chat, chunk),
+                                timeout=_BULK_FETCH_TIMEOUT,
+                            )
                             if isinstance(fetched, list):
                                 all_msgs.extend(fetched)
                             elif fetched:
@@ -795,6 +810,7 @@ def setup(app):
                                 ok, reason = await SafeForward.run_album(
                                     uc, bot, chat_id, chat_a, msg.id,
                                     on_progress=_progress,
+                                    is_premium=is_prem,
                                 )
                             else:
                                 ok, reason = await SafeForward.run(
