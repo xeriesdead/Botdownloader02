@@ -460,6 +460,7 @@ def setup(app):
             last_progress = [time.monotonic()]
 
             async def single_job():
+                uc = None
                 async def _heartbeat():
                     try:
                         while True:
@@ -598,6 +599,11 @@ def setup(app):
                 finally:
                     heartbeat.cancel()
                     await asyncio.gather(heartbeat, return_exceptions=True)
+                    # User session menyimpan dispatcher dan koneksi Telegram.
+                    # Lepaskan setelah job agar session dari banyak user tidak
+                    # menumpuk dan memicu OOM di container Railway.
+                    if uc is not None:
+                        await session_manager.close(uid)
 
             pos = queue_manager.add_job(single_job, is_prem, uid)
             if pos == 0:
@@ -707,6 +713,7 @@ def setup(app):
             last_progress = [time.monotonic()]
 
             async def bulk_job():
+                uc = None
                 async def _heartbeat():
                     try:
                         while True:
@@ -902,6 +909,8 @@ def setup(app):
                 finally:
                     heartbeat.cancel()
                     await asyncio.gather(heartbeat, return_exceptions=True)
+                    if uc is not None:
+                        await session_manager.close(uid)
 
             pos = queue_manager.add_job(bulk_job, is_prem, uid)
             if pos == 0:
