@@ -55,3 +55,17 @@ def parse_telegram_link(link: str):
 def is_public_chat(chat) -> bool:
     """True untuk chat publik yang direpresentasikan sebagai @username."""
     return isinstance(chat, str) and chat.startswith("@")
+
+
+def is_single_message_link(link: str) -> bool:
+    """True jika link Telegram memiliki query `single` dari link album."""
+    raw = (link or "").strip()
+    if not raw:
+        return False
+
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    return any(
+        part.split("=", 1)[0].strip().lower() == "single"
+        for part in parsed.query.split("&")
+        if part
+    )
