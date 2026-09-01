@@ -4,7 +4,10 @@ from logger import logger
 PREMIUM_PRIORITY = 3
 GLOBAL_DELAY     = 1.2
 JOB_TIMEOUT      = 600   # 10 menit — cukup untuk file besar hingga 1 GB
-WORKER_COUNT     = 3
+# Satu worker mencegah beberapa transfer Pyrogram besar berjalan bersamaan.
+# Railway menjalankan bot dalam container dengan RAM terbatas; throughput lebih
+# rendah lebih aman daripada membuat seluruh bot mati karena OOM.
+WORKER_COUNT     = 1
 
 
 class QueueManager:
