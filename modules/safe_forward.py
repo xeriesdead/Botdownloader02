@@ -722,21 +722,25 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
 
 
 async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
-                              on_progress=None, is_premium: bool = False):
+                              on_progress=None, is_premium: bool = False,
+                              messages=None):
     """
     Download seluruh album via Pyrogram, lalu kirim sebagai media group via PTB bot.
     File object tetap terbuka hingga send_media_group selesai, lalu ditutup & dihapus.
     on_progress: async callable(text: str) untuk update status (opsional).
     """
-    try:
-        msgs = await asyncio.wait_for(
-            client.get_media_group(chat, msg_id),
-            timeout=_ALBUM_FETCH_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        raise RuntimeError(
-            "Timeout saat mengambil metadata album dari Telegram."
-        )
+    if messages is None:
+        try:
+            msgs = await asyncio.wait_for(
+                client.get_media_group(chat, msg_id),
+                timeout=_ALBUM_FETCH_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                "Timeout saat mengambil metadata album dari Telegram."
+            )
+    else:
+        msgs = messages
     total = len(msgs)
     size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
     size_label = (
@@ -1257,6 +1261,75 @@ async def _send_album_individually(
     return True, None
 
 
+async def _fetch_album_messages(client, chat, msg_id: int):
+    """Ambil metadata album sekali dengan batas waktu yang tegas."""
+    try:
+        return await asyncio.wait_for(
+            client.get_media_group(chat, msg_id),
+            timeout=_ALBUM_FETCH_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            "Timeout saat mengambil metadata album dari Telegram."
+        )
+
+
+async def _copy_public_album(
+    bot, source_chat: str, messages, user_chat_id: int, on_progress=None,
+) -> tuple[bool, str | None] | None:
+    """
+    Salin album publik langsung dari Telegram tanpa melewati Railway.
+
+    Return None berarti jalur Bot API tidak tersedia sebelum ada pesan yang
+    berhasil dikirim, sehingga pemanggil boleh mencoba fallback download.
+    Jika sudah ada pesan yang tersalin lalu item berikutnya gagal, return
+    (False, reason) agar pemanggil tidak mengirim ulang item yang sama.
+    """
+    if not isinstance(source_chat, str) or not source_chat.startswith("@"):
+        return None
+
+    copied = 0
+    for index, message in enumerate(messages, 1):
+        await _notify_progress(
+            on_progress,
+            f"📤 <b>Menyalin album...</b> ({index}/{len(messages)})",
+        )
+        try:
+            await asyncio.wait_for(
+                bot.copy_message(
+                    chat_id=user_chat_id,
+                    from_chat_id=source_chat,
+                    message_id=message.id,
+                    write_timeout=_PTB_WRITE_TIMEOUT,
+                    read_timeout=_PTB_READ_TIMEOUT,
+                    connect_timeout=_PTB_CONNECT_TIMEOUT,
+                ),
+                timeout=_BOT_COPY_TIMEOUT,
+            )
+            copied += 1
+        except asyncio.TimeoutError:
+            reason = "Timeout saat menyalin album dari Telegram."
+        except (BadRequest, Forbidden) as exc:
+            reason = f"Bot API tidak bisa menyalin album: {exc}"
+        except Exception as exc:
+            reason = f"Gagal menyalin album: {exc}"
+
+        if copied < index:
+            if copied:
+                return False, (
+                    f"Album hanya tersalin {copied}/{len(messages)} media. "
+                    "Silakan coba lagi."
+                )
+            logger.info(
+                "Bot API album copy tidak tersedia untuk %s: %s",
+                source_chat,
+                reason,
+            )
+            return None
+
+    return True, None
+
+
 # ── SafeForward ───────────────────────────────────────────────────────────────
 
 class SafeForward:
@@ -1294,9 +1367,24 @@ class SafeForward:
         for attempt in range(MAX_RETRIES + 1):
             try:
                 await _notify_progress(on_progress, "📥 <b>Mengambil album...</b>")
+                album_messages = await _fetch_album_messages(
+                    client, source_chat, msg_id
+                )
+
+                # Album publik tidak perlu di-download ke Railway. Salin
+                # setiap item langsung dari channel melalui Bot API.
+                if not is_restricted:
+                    copied_result = await _copy_public_album(
+                        bot, chat, album_messages, user_chat_id,
+                        on_progress=on_progress,
+                    )
+                    if copied_result is not None:
+                        return copied_result
+
                 album_result = await _send_album_via_bot(
                     client, bot, source_chat, msg_id, user_chat_id,
                     on_progress=on_progress, is_premium=is_premium,
+                    messages=album_messages,
                 )
                 if album_result is not None:
                     return album_result
@@ -1355,6 +1443,7 @@ class SafeForward:
         on_progress=None,
         is_premium: bool = False,
         skip_public_copy: bool = False,
+        single_only: bool = False,
     ) -> tuple[bool, str | None]:
         """
         Ambil pesan dari `chat`/`msg_id` dan kirim ke `user_chat_id` via PTB bot.
@@ -1417,7 +1506,7 @@ class SafeForward:
             return False, f"Pesan `{msg_id}` kosong atau sudah dihapus."
 
         # ── Auto-deteksi album ────────────────────────────────────────────
-        if msg.media_group_id:
+        if msg.media_group_id and not single_only:
             return await SafeForward.run_album(
                 client, bot, user_chat_id, chat, msg_id,
                 on_progress=on_progress, is_premium=is_premium,
