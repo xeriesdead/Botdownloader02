@@ -99,12 +99,13 @@ class SessionManager:
         return await self.get(user_id)
 
     async def close(self, user_id: int):
-        if user_id in self._sessions:
-            try:
-                await self._sessions[user_id].disconnect()
-            except Exception:
-                pass
-            del self._sessions[user_id]
+        async with self._lock(user_id):
+            if user_id in self._sessions:
+                client = self._sessions.pop(user_id)
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
     async def close_all(self):
         for uid in list(self._sessions.keys()):
