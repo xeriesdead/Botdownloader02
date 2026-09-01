@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import shutil
 import subprocess
 import tempfile
 import time
@@ -182,6 +183,15 @@ _BOT_COPY_TIMEOUT      = 30   # detik — jalur cepat untuk pesan channel publik
 _PTB_WRITE_TIMEOUT   = 90    # detik
 _PTB_READ_TIMEOUT    = 60    # detik
 _PTB_CONNECT_TIMEOUT = 15    # detik
+
+
+def _new_download_dir(user_chat_id: int) -> str:
+    """Buat direktori sementara yang bisa dihapus utuh setelah satu job."""
+    os.makedirs("downloads", exist_ok=True)
+    return tempfile.mkdtemp(
+        prefix=f"telegram_{int(user_chat_id)}_",
+        dir="downloads",
+    )
 
 
 async def _notify_progress(on_progress, text: str):
@@ -606,27 +616,31 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
         if on_progress and file_size >= _PROGRESS_MIN_BYTES
         else None
     )
+    work_dir = _new_download_dir(user_chat_id)
+    path = None
+    thumbnail_path = None
     try:
-        path = await asyncio.wait_for(
-            client.download_media(msg, progress=dl_cb),
-            timeout=_DOWNLOAD_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
-    if not path:
-        raise RuntimeError("Download gagal, file tidak tersedia.")
+        try:
+            path = await asyncio.wait_for(
+                client.download_media(msg, file_name=work_dir, progress=dl_cb),
+                timeout=_DOWNLOAD_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
 
-    caption = _build_caption(msg.caption or "")
-    thumbnail_path = (
-        await _create_video_thumbnail_async(path) if msg.video else None
-    )
-    metadata = _video_metadata(msg)
-    _kw = dict(
-        write_timeout=_PTB_WRITE_TIMEOUT,
-        read_timeout=_PTB_READ_TIMEOUT,
-        connect_timeout=_PTB_CONNECT_TIMEOUT,
-    )
-    try:
+        if not path:
+            raise RuntimeError("Download gagal, file tidak tersedia.")
+
+        caption = _build_caption(msg.caption or "")
+        thumbnail_path = (
+            await _create_video_thumbnail_async(path) if msg.video else None
+        )
+        metadata = _video_metadata(msg)
+        _kw = dict(
+            write_timeout=_PTB_WRITE_TIMEOUT,
+            read_timeout=_PTB_READ_TIMEOUT,
+            connect_timeout=_PTB_CONNECT_TIMEOUT,
+        )
         if msg.photo:
             with open(path, "rb") as f:
                 await asyncio.wait_for(
@@ -698,19 +712,16 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                     timeout=_UPLOAD_TIMEOUT,
                 )
     finally:
-        try:
-            os.remove(path)
-        except Exception:
-            pass
         if thumbnail_path:
             try:
                 os.remove(thumbnail_path)
             except Exception:
                 pass
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
-                              on_progress=None):
+                              on_progress=None, is_premium: bool = False):
     """
     Download seluruh album via Pyrogram, lalu kirim sebagai media group via PTB bot.
     File object tetap terbuka hingga send_media_group selesai, lalu ditutup & dihapus.
@@ -718,7 +729,22 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
     """
     msgs  = await client.get_media_group(chat, msg_id)
     total = len(msgs)
+    size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
+    size_label = (
+        f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
+        if is_premium else f"{MAX_FILE_SIZE_MB} MB"
+    )
+    oversized = [
+        _get_file_size(m) for m in msgs
+        if _get_file_size(m) and _get_file_size(m) > size_limit
+    ]
+    if oversized:
+        return False, (
+            f"Album memiliki media terlalu besar ({_fmt_size(max(oversized))}). "
+            f"Batas maksimal: {size_label}."
+        )
     paths: list[str]    = []
+    download_dirs: list[str] = []
     thumbnail_paths: list[str] = []
     handles: list       = []
     thumbnail_handles: list = []
@@ -745,12 +771,12 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 except Exception:
                     pass
             path = None
-            target = _album_download_target(m, user_chat_id, msg_id, i + 1)
+            item_dir = _new_download_dir(user_chat_id)
             for _dl_attempt in range(2):
                 try:
                     path = await asyncio.wait_for(
                         client.download_media(
-                            m, file_name=target, progress=dl_cb
+                            m, file_name=item_dir, progress=dl_cb
                         ),
                         timeout=dl_timeout,
                     )
@@ -766,8 +792,10 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                         await asyncio.sleep(2)
             if not path:
                 logger.error(f"Skip album item {i + 1}/{total} msg {m.id} setelah 2 percobaan.")
+                shutil.rmtree(item_dir, ignore_errors=True)
                 continue
             paths.append(path)
+            download_dirs.append(item_dir)
 
             caption = _build_caption(m.caption or "") if i == 0 else ""
             f       = open(path, "rb")  # noqa: WPS515 — ditutup di finally
@@ -845,6 +873,8 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 os.remove(p)
             except Exception:
                 pass
+        for directory in download_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
         for p in thumbnail_paths:
             try:
                 os.remove(p)
@@ -872,29 +902,37 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
     """
     show_progress = on_progress and file_size >= _PROGRESS_MIN_BYTES
     dl_cb = _make_pyrogram_progress(on_progress, "Mengunduh", file_size) if show_progress else None
+    work_dir = _new_download_dir(user_chat_id)
+    path = None
+    thumbnail_path = None
 
     try:
-        path = await asyncio.wait_for(
-            client.download_media(msg, progress=dl_cb),
-            timeout=_DOWNLOAD_TIMEOUT,
+        try:
+            path = await asyncio.wait_for(
+                client.download_media(msg, file_name=work_dir, progress=dl_cb),
+                timeout=_DOWNLOAD_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
+
+        if not path:
+            raise RuntimeError("Download gagal, file tidak tersedia.")
+
+        # Kirim ke chat bot (bukan Saved Messages).
+        # Dari sudut pandang Pyrogram (login sebagai user), mengirim ke @bot_username
+        # membuat file muncul langsung di chat antara user dan bot.
+        bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+
+        ul_cb = _make_pyrogram_progress(on_progress, "Mengirim", file_size) if show_progress else None
+        caption = _build_caption(msg.caption or "")
+        # Thumbnail tidak wajib dan proses FFmpeg tambahan berisiko memakai RAM
+        # besar untuk video ratusan MB. Video tetap bisa dikirim tanpa thumbnail.
+        thumbnail_path = (
+            await _create_video_thumbnail_async(path)
+            if msg.video and file_size <= 50 * 1024 * 1024
+            else None
         )
-    except asyncio.TimeoutError:
-        raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
-    if not path:
-        raise RuntimeError("Download gagal, file tidak tersedia.")
-
-    # Kirim ke chat bot (bukan Saved Messages).
-    # Dari sudut pandang Pyrogram (login sebagai user), mengirim ke @bot_username
-    # membuat file muncul langsung di chat antara user dan bot.
-    bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
-
-    ul_cb = _make_pyrogram_progress(on_progress, "Mengirim", file_size) if show_progress else None
-    caption = _build_caption(msg.caption or "")
-    thumbnail_path = (
-        await _create_video_thumbnail_async(path) if msg.video else None
-    )
-    metadata = _video_metadata(msg)
-    try:
+        metadata = _video_metadata(msg)
         if msg.photo:
             await asyncio.wait_for(
                 client.send_photo(bot_peer, path, caption=caption, progress=ul_cb),
@@ -944,15 +982,12 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                 timeout=_UPLOAD_TIMEOUT,
             )
     finally:
-        try:
-            os.remove(path)
-        except Exception:
-            pass
         if thumbnail_path:
             try:
                 os.remove(thumbnail_path)
             except Exception:
                 pass
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 async def _send_album_item(
@@ -1081,7 +1116,7 @@ async def _send_album_item(
 
 async def _send_album_individually(
     client, bot, chat, msg_id: int, user_chat_id: int,
-    on_progress=None,
+    on_progress=None, is_premium: bool = False,
 ) -> tuple[bool, str | None]:
     """
     Fallback album: download semua file lalu coba kirim sebagai album (send_media_group).
@@ -1098,9 +1133,24 @@ async def _send_album_individually(
         return False, "Album kosong atau tidak ditemukan."
 
     total = len(msgs)
+    size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
+    size_label = (
+        f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
+        if is_premium else f"{MAX_FILE_SIZE_MB} MB"
+    )
+    oversized = [
+        _get_file_size(m) for m in msgs
+        if _get_file_size(m) and _get_file_size(m) > size_limit
+    ]
+    if oversized:
+        return False, (
+            f"Album memiliki media terlalu besar ({_fmt_size(max(oversized))}). "
+            f"Batas maksimal: {size_label}."
+        )
 
     # Download semua file terlebih dahulu
     paths: list[str] = []
+    download_dirs: list[str] = []
     for i, m in enumerate(msgs):
         file_size  = _get_file_size(m) or 0
         dl_timeout = max(60, 30 + (file_size // (10 * 1024 * 1024)) * 30)
@@ -1119,12 +1169,12 @@ async def _send_album_individually(
             except Exception:
                 pass
         path = None
-        target = _album_download_target(m, user_chat_id, msg_id, i + 1)
+        item_dir = _new_download_dir(user_chat_id)
         for _dl_attempt in range(2):
             try:
                 path = await asyncio.wait_for(
                     client.download_media(
-                        m, file_name=target, progress=dl_cb
+                        m, file_name=item_dir, progress=dl_cb
                     ),
                     timeout=dl_timeout,
                 )
@@ -1140,8 +1190,10 @@ async def _send_album_individually(
                     await asyncio.sleep(2)
         if path:
             paths.append((m, path))
+            download_dirs.append(item_dir)
         else:
             logger.error(f"Skip album item {i + 1}/{total} msg {m.id} setelah 2 percobaan.")
+            shutil.rmtree(item_dir, ignore_errors=True)
 
     if not paths:
         return False, "Gagal mendownload semua file dalam album."
@@ -1183,6 +1235,7 @@ async def _send_album_individually(
             os.remove(path)
         except Exception:
             pass
+        shutil.rmtree(os.path.dirname(path), ignore_errors=True)
 
     if sent == 0:
         return False, "Semua file dalam album gagal dikirim."
@@ -1199,7 +1252,7 @@ class SafeForward:
     @staticmethod
     async def run_album(
         client, bot, user_chat_id: int, chat, msg_id: int,
-        on_progress=None,
+        on_progress=None, is_premium: bool = False,
     ) -> tuple[bool, str | None]:
         """
         Kirim seluruh album yang mengandung `msg_id` ke `user_chat_id`.
@@ -1222,15 +1275,19 @@ class SafeForward:
         await _notify_progress(on_progress, "🔎 <b>Memeriksa akses media...</b>")
         if await _is_forwards_restricted(client, chat):
             return await _send_album_individually(
-                client, bot, chat, msg_id, user_chat_id, on_progress=on_progress
+                client, bot, chat, msg_id, user_chat_id,
+                on_progress=on_progress, is_premium=is_premium,
             )
 
         for attempt in range(MAX_RETRIES + 1):
             try:
                 await _notify_progress(on_progress, "📥 <b>Mengambil album...</b>")
-                await _send_album_via_bot(
-                    client, bot, chat, msg_id, user_chat_id, on_progress=on_progress
+                album_result = await _send_album_via_bot(
+                    client, bot, chat, msg_id, user_chat_id,
+                    on_progress=on_progress, is_premium=is_premium,
                 )
+                if album_result is not None:
+                    return album_result
                 return True, None
 
             except FloodWait as e:
@@ -1261,7 +1318,8 @@ class SafeForward:
                 # Langsung kirim satu per satu via download + re-upload (bypass restriction).
                 logger.info(f"ChatForwardsRestricted on album msg {msg_id}, kirim satu per satu")
                 return await _send_album_individually(
-                    client, bot, chat, msg_id, user_chat_id, on_progress=on_progress
+                    client, bot, chat, msg_id, user_chat_id,
+                    on_progress=on_progress, is_premium=is_premium,
                 )
 
             except Exception as e:
@@ -1273,7 +1331,8 @@ class SafeForward:
                     # (JANGAN gunakan copy_media_group — akan gagal di channel restricted)
                     logger.info(f"Fallback kirim album satu per satu msg {msg_id}: {e}")
                     return await _send_album_individually(
-                        client, bot, chat, msg_id, user_chat_id, on_progress=on_progress
+                        client, bot, chat, msg_id, user_chat_id,
+                        on_progress=on_progress, is_premium=is_premium,
                     )
 
         return False, "Gagal setelah beberapa percobaan."
@@ -1313,7 +1372,7 @@ class SafeForward:
 
         # ── Langkah 1: Pastikan source bisa diakses ──────────────────────
         await _notify_progress(on_progress, "🔌 <b>Menghubungkan ke channel...</b>")
-        _, src_err = await _resolve_source(client, chat)
+        source_chat, src_err = await _resolve_source(client, chat)
         if src_err:
             return False, src_err
 
@@ -1348,7 +1407,8 @@ class SafeForward:
         # ── Auto-deteksi album ────────────────────────────────────────────
         if msg.media_group_id:
             return await SafeForward.run_album(
-                client, bot, user_chat_id, chat, msg_id, on_progress=on_progress
+                client, bot, user_chat_id, chat, msg_id,
+                on_progress=on_progress, is_premium=is_premium,
             )
 
         # ── Langkah 3: Cek ukuran file terhadap hard limit ───────────────
