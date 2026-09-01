@@ -9,7 +9,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from modules.queue_manager import queue_manager, JOB_TIMEOUT
 from modules.session_manager import session_manager
-from modules.link_parser import parse_telegram_link, is_public_chat
+from modules.link_parser import (
+    parse_telegram_link,
+    is_public_chat,
+    is_single_message_link,
+)
 from modules.social_downloader import (
     cleanup_download,
     download_public_media,
@@ -393,6 +397,10 @@ def setup(app):
                 return await update.message.reply_text(
                     _LINK_INVALID_TEXT, parse_mode=ParseMode.HTML
                 )
+            # Telegram menambahkan ?single pada link satu item dari sebuah
+            # album. Jangan otomatis mengambil seluruh media group untuk link
+            # yang secara eksplisit meminta satu pesan.
+            single_only = is_single_message_link(args[0])
 
             if _requires_user_login(chat) and not _check_logged_in(uid):
                 return await update.message.reply_text(
@@ -556,6 +564,7 @@ def setup(app):
                                     on_progress=_progress,
                                     is_premium=is_prem,
                                     skip_public_copy=public_copy_failed,
+                                    single_only=single_only,
                                 ),
                                 timeout=_SINGLE_JOB_TIMEOUT,
                             )
