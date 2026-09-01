@@ -26,10 +26,11 @@ ADMIN_IDS: set[int] = {
 # Contoh: REQUIRED_CHANNEL=mychannel  atau  REQUIRED_CHANNEL=-1001234567890
 REQUIRED_CHANNEL: str | None = os.getenv("REQUIRED_CHANNEL") or None
 
-# Batas ukuran file download untuk user reguler (default 1024 MB = 1 GB)
+# Batas ukuran file download untuk user reguler (maksimal 500 MB)
 # File ≤50 MB: dikirim langsung via Bot API ke chat bot
-# File 50 MB–1 GB (channel private): otomatis dikirim ke Saved Messages + notifikasi
-MAX_FILE_SIZE_MB: int    = int(os.getenv("MAX_FILE_SIZE_MB", "1024"))
+# File 50 MB–500 MB (channel private): otomatis dikirim via fallback Pyrogram
+_configured_regular_limit = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
+MAX_FILE_SIZE_MB: int    = max(1, min(_configured_regular_limit, 500))
 MAX_FILE_SIZE_BYTES: int = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # Batas ukuran file download untuk user Premium (default 2048 MB = 2 GB)
