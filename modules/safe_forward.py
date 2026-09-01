@@ -176,6 +176,7 @@ _MSG_FETCH_TIMEOUT     = 25   # detik — batas waktu get_messages
 _ACCESS_CHECK_TIMEOUT  = 12   # detik — batas waktu pre-flight cek akses channel
 _DOWNLOAD_TIMEOUT      = 120  # detik — batas waktu download satu file via Pyrogram (2 menit)
 _UPLOAD_TIMEOUT        = 300  # detik — batas waktu upload satu file ke Bot API (5 menit)
+_ALBUM_FETCH_TIMEOUT   = 30   # detik — batas waktu mengambil metadata album
 _ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file — dipakai di _send_album_via_bot
 _BOT_COPY_TIMEOUT      = 30   # detik — jalur cepat untuk pesan channel publik
 
@@ -727,7 +728,15 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
     File object tetap terbuka hingga send_media_group selesai, lalu ditutup & dihapus.
     on_progress: async callable(text: str) untuk update status (opsional).
     """
-    msgs  = await client.get_media_group(chat, msg_id)
+    try:
+        msgs = await asyncio.wait_for(
+            client.get_media_group(chat, msg_id),
+            timeout=_ALBUM_FETCH_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            "Timeout saat mengambil metadata album dari Telegram."
+        )
     total = len(msgs)
     size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
     size_label = (
@@ -1125,7 +1134,10 @@ async def _send_album_individually(
     on_progress: async callable(text: str) untuk update status (opsional).
     """
     try:
-        msgs = await client.get_media_group(chat, msg_id)
+        msgs = await asyncio.wait_for(
+            client.get_media_group(chat, msg_id),
+            timeout=_ALBUM_FETCH_TIMEOUT,
+        )
     except Exception as e:
         return False, f"Gagal mengambil album: {e}"
 
@@ -1273,9 +1285,9 @@ class SafeForward:
 
         # ── Deteksi noforwards sebelum mencoba forward/copy ───────────────
         await _notify_progress(on_progress, "🔎 <b>Memeriksa akses media...</b>")
-        if await _is_forwards_restricted(client, chat):
+        if await _is_forwards_restricted(client, source_chat):
             return await _send_album_individually(
-                client, bot, chat, msg_id, user_chat_id,
+                client, bot, source_chat, msg_id, user_chat_id,
                 on_progress=on_progress, is_premium=is_premium,
             )
 
@@ -1283,7 +1295,7 @@ class SafeForward:
             try:
                 await _notify_progress(on_progress, "📥 <b>Mengambil album...</b>")
                 album_result = await _send_album_via_bot(
-                    client, bot, chat, msg_id, user_chat_id,
+                    client, bot, source_chat, msg_id, user_chat_id,
                     on_progress=on_progress, is_premium=is_premium,
                 )
                 if album_result is not None:
@@ -1318,7 +1330,7 @@ class SafeForward:
                 # Langsung kirim satu per satu via download + re-upload (bypass restriction).
                 logger.info(f"ChatForwardsRestricted on album msg {msg_id}, kirim satu per satu")
                 return await _send_album_individually(
-                    client, bot, chat, msg_id, user_chat_id,
+                    client, bot, source_chat, msg_id, user_chat_id,
                     on_progress=on_progress, is_premium=is_premium,
                 )
 
@@ -1331,7 +1343,7 @@ class SafeForward:
                     # (JANGAN gunakan copy_media_group — akan gagal di channel restricted)
                     logger.info(f"Fallback kirim album satu per satu msg {msg_id}: {e}")
                     return await _send_album_individually(
-                        client, bot, chat, msg_id, user_chat_id,
+                    client, bot, source_chat, msg_id, user_chat_id,
                         on_progress=on_progress, is_premium=is_premium,
                     )
 
@@ -1378,7 +1390,7 @@ class SafeForward:
 
         # ── Deteksi noforwards sebelum fetch pesan ────────────────────────
         await _notify_progress(on_progress, "🔎 <b>Memeriksa akses media...</b>")
-        is_restricted = await _is_forwards_restricted(client, chat)
+        is_restricted = await _is_forwards_restricted(client, source_chat)
 
         # ── Langkah 2: Ambil pesan ───────────────────────────────────────
         await _notify_progress(on_progress, "📥 <b>Mengambil pesan dari channel...</b>")
