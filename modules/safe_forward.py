@@ -206,6 +206,56 @@ async def check_channel_access(client, chat) -> tuple[bool, str]:
         return True, ""
 
 
+async def _hard_timeout(awaitable, timeout: float, operation: str = "operation"):
+    """Wait for an async operation and preserve TimeoutError for callers."""
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning("%s timed out after %ss", operation, timeout)
+        raise
+
+
+async def copy_public_message(
+    bot,
+    user_chat_id: int,
+    source_chat,
+    message_id: int,
+    on_progress=None,
+) -> bool:
+    """
+    Fast path for public Telegram posts.
+
+    Return False instead of raising when Bot API cannot copy the source, so the
+    caller can fall back to the logged-in Pyrogram session.
+    """
+    if on_progress:
+        try:
+            await on_progress("📤 <b>Mengirim media...</b>")
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(
+            bot.copy_message(
+                chat_id=user_chat_id,
+                from_chat_id=source_chat,
+                message_id=message_id,
+                write_timeout=_PTB_WRITE_TIMEOUT,
+                read_timeout=_PTB_READ_TIMEOUT,
+                connect_timeout=_PTB_CONNECT_TIMEOUT,
+            ),
+            timeout=_UPLOAD_TIMEOUT,
+        )
+        return True
+    except Exception as exc:
+        logger.info(
+            "Bot API copy gagal untuk %s/%s, gunakan fallback Pyrogram: %s",
+            source_chat,
+            message_id,
+            exc,
+        )
+        return False
+
+
 async def _is_forwards_restricted(client, chat) -> bool:
     """
     Cek apakah channel/grup mengaktifkan 'Restrict Saving Content' (noforwards).
@@ -737,6 +787,7 @@ class SafeForward:
     async def run_album(
         client, bot, user_chat_id: int, chat, msg_id: int,
         on_progress=None,
+        is_premium: bool = False,
     ) -> tuple[bool, str | None]:
         """
         Kirim seluruh album yang mengandung `msg_id` ke `user_chat_id`.
@@ -817,6 +868,8 @@ class SafeForward:
         client, bot, user_chat_id: int, chat, msg_id: int,
         on_progress=None,
         is_premium: bool = False,
+        skip_public_copy: bool = False,
+        single_only: bool = False,
     ) -> tuple[bool, str | None]:
         """
         Ambil pesan dari `chat`/`msg_id` dan kirim ke `user_chat_id` via PTB bot.
@@ -863,7 +916,7 @@ class SafeForward:
             return False, f"Pesan `{msg_id}` kosong atau sudah dihapus."
 
         # ── Auto-deteksi album ────────────────────────────────────────────
-        if msg.media_group_id:
+        if msg.media_group_id and not single_only:
             return await SafeForward.run_album(
                 client, bot, user_chat_id, chat, msg_id, on_progress=on_progress
             )
@@ -895,6 +948,20 @@ class SafeForward:
                         )
                         return True, None
                     else:
+                        if skip_public_copy:
+                            # The Bot API already failed to access this public
+                            # source. Use the logged-in Pyrogram session directly
+                            # instead of retrying the same copy operation.
+                            if is_large:
+                                await _pyrogram_copy_with_notice(
+                                    client, bot, msg, user_chat_id, file_size
+                                )
+                            else:
+                                await _download_and_upload_via_pyrogram(
+                                    client, bot, msg, user_chat_id, file_size,
+                                    on_progress=on_progress,
+                                )
+                            return True, None
                         # Fast path: PTB bot.copy_message
                         # Tidak ada batasan ukuran (file tidak di-download),
                         # tidak masuk Saved Messages karena dikirim dari bot.
