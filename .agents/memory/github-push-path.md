@@ -3,7 +3,7 @@ name: GitHub push path
 description: How to publish repository changes when the local Git remote cannot authenticate.
 ---
 
-When the local HTTPS Git remote rejects authentication, use the attached GitHub integration's authenticated API to update the repository file through the Contents API instead of asking for a token in chat. Before updating a dependent module, inspect the related files on GitHub because the deployed branch can be ahead of the local checkout.
+When the local HTTPS Git remote rejects authentication, use the attached GitHub integration's authenticated API to update the repository file through the Contents API instead of asking for a token in chat. Before updating a dependent module, inspect the related files on GitHub because the deployed branch can be ahead of the local checkout; preserve compatible function signatures when versions differ.
 
 **Why:** The workspace Git remote can lose or reject its stored credentials even though the Replit GitHub connection is healthy.
 
