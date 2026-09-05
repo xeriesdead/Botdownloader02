@@ -872,7 +872,6 @@ async def _send_downloaded_file_via_pyrogram(
         if show_progress else None
     )
     caption = _build_caption(msg.caption or "")
-    metadata = _video_metadata(msg)
 
     if msg.photo:
         send = lambda progress: client.send_photo(
@@ -880,16 +879,16 @@ async def _send_downloaded_file_via_pyrogram(
         )
         operation = "Pyrogram send_photo"
     elif msg.video:
-        send = lambda progress: client.send_video(
+        # Media anti-forward sering berupa video 30–50 MB. Kirim sebagai
+        # document agar Telegram tidak menunggu pemrosesan/inspeksi video
+        # sebelum menyelesaikan upload ulang.
+        send = lambda progress: client.send_document(
             bot_peer,
             path,
             caption=caption,
-            supports_streaming=True,
-            thumb=None,
             progress=progress,
-            **metadata,
         )
-        operation = "Pyrogram send_video"
+        operation = "Pyrogram send_document(video)"
     elif msg.audio:
         send = lambda progress: client.send_audio(
             bot_peer, path, caption=caption, progress=progress,
@@ -1262,6 +1261,14 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
 
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
+        if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+            raise RuntimeError("Download selesai tetapi file kosong atau hilang.")
+        logger.info(
+            "Media lokal siap di-upload ulang: msg=%s expected=%s actual=%s",
+            getattr(msg, "id", "?"),
+            file_size,
+            os.path.getsize(path),
+        )
 
         # Untuk channel restricted/private, MTProto adalah jalur utama. Bot API
         # tidak memberi progress upload dan sebelumnya membuat job tampak
@@ -1825,6 +1832,20 @@ class SafeForward:
                 on_progress=on_progress, is_premium=is_premium,
             )
 
+        # Proteksi dapat muncul pada message hasil raw API walaupun metadata
+        # chat yang di-cache tidak menampilkannya. Untuk media ini, jangan
+        # pernah mencoba copy/forward; wajib download lalu upload ulang.
+        message_restricted = bool(
+            getattr(msg, "has_protected_content", False)
+        )
+        if message_restricted and not is_restricted:
+            logger.info(
+                "Message %s memiliki has_protected_content — "
+                "pakai jalur download+upload ulang",
+                msg_id,
+            )
+        is_restricted = is_restricted or message_restricted
+
         # ── Langkah 3: Cek ukuran file terhadap hard limit ───────────────
         file_size  = _get_file_size(msg)
         size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
@@ -1846,6 +1867,11 @@ class SafeForward:
                         # Channel noforwards: setelah download, selalu upload ulang
                         # lewat Pyrogram MTProto. Bot API multipart sering macet pada
                         # video 30–50 MB walaupun masih di bawah batas 50 MB.
+                        await _notify_progress(
+                            on_progress,
+                            "🔒 <b>Media anti-forward terdeteksi.</b>\n"
+                            "📥 Menyiapkan salinan untuk dikirim ulang...",
+                        )
                         await _download_and_upload_via_pyrogram(
                             client, bot, msg, user_chat_id, file_size,
                             on_progress=on_progress,
