@@ -42,7 +42,8 @@ _BOT_API_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
 _BOT_USERNAME: str = ""
 
 
-def set_bot_username(username: str):
+def set_bot_username(username: str, bot_id: int | None = None):
+    """Store bot identity; bot_id is accepted for compatibility with newer main.py."""
     global _BOT_USERNAME
     _BOT_USERNAME = username
 
