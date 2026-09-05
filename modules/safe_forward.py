@@ -252,13 +252,33 @@ async def _prepare_bot_peer(client):
     berhenti sebelum callback upload pertama. Resolve sekali dengan timeout dan
     gunakan ID numerik yang sudah masuk peer cache Pyrogram.
     """
-    peer = _bot_peer()
-    await _hard_timeout(
-        client.resolve_peer(peer),
-        timeout=_PEER_RESOLVE_TIMEOUT,
-        operation=f"resolve bot peer {peer}",
-    )
-    return _BOT_USER_ID or peer
+    # Username adalah cara paling aman untuk mengisi peer cache session user.
+    # Setelah resolve sukses, ID numerik dapat dipakai tanpa lookup jaringan
+    # tambahan saat send_* dimulai.
+    if _BOT_USERNAME:
+        username_peer = f"@{_BOT_USERNAME}"
+        try:
+            await _hard_timeout(
+                client.resolve_peer(username_peer),
+                timeout=_PEER_RESOLVE_TIMEOUT,
+                operation=f"resolve bot peer {username_peer}",
+            )
+            return _BOT_USER_ID or username_peer
+        except Exception:
+            # Jika username tidak bisa di-resolve, coba ID yang sudah diberikan
+            # oleh get_me(). Error terakhir tetap dilaporkan bila keduanya gagal.
+            if not _BOT_USER_ID:
+                raise
+
+    if _BOT_USER_ID:
+        await _hard_timeout(
+            client.resolve_peer(_BOT_USER_ID),
+            timeout=_PEER_RESOLVE_TIMEOUT,
+            operation=f"resolve bot peer {_BOT_USER_ID}",
+        )
+        return _BOT_USER_ID
+
+    raise RuntimeError("Identitas bot belum siap untuk upload Telegram.")
 
 
 def _new_download_dir(user_chat_id: int) -> str:
@@ -839,6 +859,75 @@ async def _send_downloaded_file_via_bot(
             )
 
 
+async def _send_downloaded_file_via_pyrogram(
+    client, msg, path: str, file_size: int, on_progress=None,
+):
+    """Upload file lokal via MTProto setelah peer bot dipastikan siap."""
+    await _notify_progress(on_progress, "📤 <b>Mengirim media via MTProto...</b>")
+    bot_peer = await _prepare_bot_peer(client)
+    show_progress = on_progress and file_size >= _PROGRESS_MIN_BYTES
+    ul_cb = (
+        _make_pyrogram_progress(on_progress, "Mengirim", file_size)
+        if show_progress else None
+    )
+    caption = _build_caption(msg.caption or "")
+    metadata = _video_metadata(msg)
+
+    if msg.photo:
+        send = lambda progress: client.send_photo(
+            bot_peer, path, caption=caption, progress=progress,
+        )
+        operation = "Pyrogram send_photo"
+    elif msg.video:
+        send = lambda progress: client.send_video(
+            bot_peer,
+            path,
+            caption=caption,
+            supports_streaming=True,
+            thumb=None,
+            progress=progress,
+            **metadata,
+        )
+        operation = "Pyrogram send_video"
+    elif msg.audio:
+        send = lambda progress: client.send_audio(
+            bot_peer, path, caption=caption, progress=progress,
+        )
+        operation = "Pyrogram send_audio"
+    elif msg.voice:
+        send = lambda progress: client.send_voice(
+            bot_peer, path, caption=caption, progress=progress,
+        )
+        operation = "Pyrogram send_voice"
+    elif msg.video_note:
+        send = lambda progress: client.send_video_note(
+            bot_peer, path, progress=progress,
+        )
+        operation = "Pyrogram send_video_note"
+    elif msg.animation:
+        send = lambda progress: client.send_animation(
+            bot_peer, path, caption=caption, progress=progress,
+        )
+        operation = "Pyrogram send_animation"
+    elif msg.sticker:
+        send = lambda progress: client.send_sticker(
+            bot_peer, path, progress=progress,
+        )
+        operation = "Pyrogram send_sticker"
+    else:
+        send = lambda progress: client.send_document(
+            bot_peer, path, caption=caption, progress=progress,
+        )
+        operation = "Pyrogram send_document"
+
+    await _run_transfer_with_watchdog(
+        send,
+        timeout=_UPLOAD_TIMEOUT,
+        operation=operation,
+        progress=ul_cb,
+    )
+
+
 async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                                      on_progress=None):
     """
@@ -1144,10 +1233,11 @@ async def _pyrogram_copy_with_notice(client, bot, msg, user_chat_id: int, file_s
 async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                                             file_size: int, on_progress=None):
     """
-    Untuk file besar (>50 MB) dari channel restricted:
+    Untuk media dari channel restricted/private:
     Download file via Pyrogram lalu upload ulang langsung ke chat bot user via MTProto.
-    Bypass sekaligus: batas 50 MB Bot API + larangan forward/copy dari channel restricted.
-    File bisa sampai 1 GB (sesuai MAX_FILE_SIZE_BYTES di config).
+    Jalur MTProto diprioritaskan agar upload 30–50 MB tidak bergantung pada
+    multipart Bot API yang tidak menyediakan progress. Bot API hanya fallback
+    jika request MTProto ditolak secara eksplisit dan file masih ≤50 MB.
     on_progress: async callable(text: str) untuk update pesan status (opsional).
     """
     show_progress = on_progress and file_size >= _PROGRESS_MIN_BYTES
@@ -1172,135 +1262,34 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
-        # File di bawah batas Bot API tidak perlu melewati upload MTProto
-        # session-user. Jalur ini juga tidak membuat bot peer baru dari dalam
-        # send_video(), yang sebelumnya menjadi titik macet pada private /get.
-        if file_size and file_size <= _BOT_API_UPLOAD_LIMIT:
-            try:
-                await _send_downloaded_file_via_bot(
-                    bot, msg, user_chat_id, path, on_progress=on_progress,
-                )
-                return
-            except (BadRequest, Forbidden) as exc:
-                logger.warning(
-                    "Bot API upload gagal untuk msg %s, fallback ke MTProto: %s",
-                    getattr(msg, "id", "?"),
-                    exc,
-                )
-                await _notify_progress(
-                    on_progress,
-                    "📤 <b>Jalur upload utama gagal, mencoba jalur cadangan...</b>",
-                )
+        # Untuk channel restricted/private, MTProto adalah jalur utama. Bot API
+        # tidak memberi progress upload dan sebelumnya membuat job tampak
+        # berhenti pada "Mengirim media via Bot API...".
+        try:
+            await _send_downloaded_file_via_pyrogram(
+                client, msg, path, file_size, on_progress=on_progress,
+            )
+            return
+        except (BadRequest, Forbidden) as exc:
+            # Request MTProto ditolak secara eksplisit, jadi aman mencoba
+            # Bot API. Timeout tidak masuk fallback karena bisa saja pesan
+            # sebenarnya sudah diterima Telegram dan retry akan menggandakan.
+            if not file_size or file_size > _BOT_API_UPLOAD_LIMIT:
+                raise
+            logger.warning(
+                "MTProto upload ditolak untuk msg %s, fallback ke Bot API: %s",
+                getattr(msg, "id", "?"),
+                exc,
+            )
+            await _notify_progress(
+                on_progress,
+                "📤 <b>Jalur MTProto ditolak, mencoba Bot API...</b>",
+            )
+            await _send_downloaded_file_via_bot(
+                bot, msg, user_chat_id, path, on_progress=on_progress,
+            )
+            return
 
-        await _notify_progress(on_progress, "📤 <b>Mengirim media via MTProto...</b>")
-        # Kirim ke chat bot (bukan Saved Messages).
-        # Resolve peer lebih dulu agar send_* tidak berhenti saat upload mulai.
-        bot_peer = await _prepare_bot_peer(client)
-
-        ul_cb = _make_pyrogram_progress(on_progress, "Mengirim", file_size) if show_progress else None
-        caption = _build_caption(msg.caption or "")
-        # Thumbnail tidak wajib dan proses FFmpeg tambahan berisiko memakai RAM
-        # besar untuk video ratusan MB. Video tetap bisa dikirim tanpa thumbnail.
-        # Thumbnail tidak wajib dan FFmpeg tidak boleh menahan pengiriman.
-        thumbnail_path = None
-        metadata = _video_metadata(msg)
-        if msg.photo:
-            await _run_transfer_with_watchdog(
-                lambda transfer_progress: client.send_photo(
-                    bot_peer,
-                    path,
-                    caption=caption,
-                    progress=transfer_progress,
-                ),
-                timeout=_UPLOAD_TIMEOUT,
-                operation="Pyrogram send_photo",
-                progress=ul_cb,
-            )
-        elif msg.video:
-            await _run_transfer_with_watchdog(
-                lambda transfer_progress: client.send_video(
-                    bot_peer,
-                    path,
-                    caption=caption,
-                    supports_streaming=True,
-                    thumb=thumbnail_path,
-                    progress=transfer_progress,
-                    **metadata,
-                ),
-                timeout=_UPLOAD_TIMEOUT,
-                operation="Pyrogram send_video",
-                progress=ul_cb,
-            )
-        elif msg.audio:
-            await _run_transfer_with_watchdog(
-                lambda transfer_progress: client.send_audio(
-                    bot_peer,
-                    path,
-                    caption=caption,
-                    progress=transfer_progress,
-                ),
-                timeout=_UPLOAD_TIMEOUT,
-                operation="Pyrogram send_audio",
-                progress=ul_cb,
-            )
-        elif msg.voice:
-            await _run_transfer_with_watchdog(
-                lambda transfer_progress: client.send_voice(
-                    bot_peer,
-                    path,
-                    caption=caption,
-                    progress=transfer_progress,
-                ),
-                timeout=_UPLOAD_TIMEOUT,
-                operation="Pyrogram send_voice",
-                progress=ul_cb,
-            )
-        elif msg.video_note:
-            await _run_transfer_with_watchdog(
-                lambda transfer_progress: client.send_video_note(
-                    bot_peer,
-                    path,
-                    progress=transfer_progress,
-                ),
-                timeout=_UPLOAD_TIMEOUT,
-                operation="Pyrogram send_video_note",
-                progress=ul_cb,
-            )
-        elif msg.animation:
-            await _run_transfer_with_watchdog(
-                lambda transfer_progress: client.send_animation(
-                    bot_peer,
-                    path,
-                    caption=caption,
-                    progress=transfer_progress,
-                ),
-                timeout=_UPLOAD_TIMEOUT,
-                operation="Pyrogram send_animation",
-                progress=ul_cb,
-            )
-        elif msg.sticker:
-            await _run_transfer_with_watchdog(
-                lambda transfer_progress: client.send_sticker(
-                    bot_peer,
-                    path,
-                    progress=transfer_progress,
-                ),
-                timeout=_UPLOAD_TIMEOUT,
-                operation="Pyrogram send_sticker",
-                progress=ul_cb,
-            )
-        else:
-            await _run_transfer_with_watchdog(
-                lambda transfer_progress: client.send_document(
-                    bot_peer,
-                    path,
-                    caption=caption,
-                    progress=transfer_progress,
-                ),
-                timeout=_UPLOAD_TIMEOUT,
-                operation="Pyrogram send_document",
-                progress=ul_cb,
-            )
     except asyncio.TimeoutError as exc:
         raise RuntimeError(
             "Upload timeout — koneksi Telegram terlalu lambat. Coba lagi."
@@ -1770,7 +1759,8 @@ class SafeForward:
         Strategi pengiriman berdasarkan ukuran & akses:
           0. Deteksi noforwards (has_protected_content) — jika aktif, pakai download+upload
           • Fast path (bot.copy_message): tanpa download, bebas ukuran, untuk channel terbuka
-          • Slow path ≤50 MB: download via Pyrogram → re-upload via PTB bot
+          • Slow path: download via Pyrogram → upload via MTProto with progress
+            (Bot API hanya fallback jika MTProto ditolak dan file ≤50 MB)
           • Fallback >50 MB private terbuka: Pyrogram copy → Saved Messages + notifikasi
           • Fallback >50 MB restricted: tidak bisa dikirim (Bot API limit)
         on_progress: async callable(text: str) untuk update progress ke user (opsional).
