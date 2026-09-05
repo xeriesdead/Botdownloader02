@@ -474,6 +474,11 @@ def setup(app):
 
             async def single_job():
                 uc = None
+                # Heartbeat harus memiliki timestamp sendiri. Tanpa inisialisasi
+                # ini task heartbeat akan berhenti dengan NameError setelah 20
+                # detik, sehingga user tidak mendapat tanda bahwa job masih hidup.
+                last_progress = [time.monotonic()]
+
                 async def _heartbeat():
                     try:
                         while True:
