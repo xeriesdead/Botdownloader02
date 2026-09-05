@@ -165,7 +165,12 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
             f"{info_line}"
         )
         try:
-            await on_progress(text)
+            # Progress hanya informasi tambahan. Jika Telegram lambat saat
+            # mengedit pesan status, transfer Pyrogram tetap berjalan.
+            await asyncio.wait_for(
+                on_progress(text),
+                timeout=_PROGRESS_CALLBACK_TIMEOUT,
+            )
         except Exception:
             pass
 
@@ -175,10 +180,12 @@ _PEER_RESOLVE_TIMEOUT  = 20   # detik — batas waktu resolve peer & get_chat
 _MSG_FETCH_TIMEOUT     = 25   # detik — batas waktu get_messages
 _ACCESS_CHECK_TIMEOUT  = 12   # detik — batas waktu pre-flight cek akses channel
 _DOWNLOAD_TIMEOUT      = 120  # detik — batas waktu download satu file via Pyrogram (2 menit)
+_DOWNLOAD_STALL_TIMEOUT = 45  # detik tanpa chunk baru sebelum transfer dibatalkan
 _UPLOAD_TIMEOUT        = 300  # detik — batas waktu upload satu file ke Bot API (5 menit)
 _ALBUM_FETCH_TIMEOUT   = 30   # detik — batas waktu mengambil metadata album
 _ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file — dipakai di _send_album_via_bot
 _BOT_COPY_TIMEOUT      = 30   # detik — jalur cepat untuk pesan channel publik
+_PROGRESS_CALLBACK_TIMEOUT = 5  # update status tidak boleh menahan transfer
 
 # Timeout PTB untuk operasi upload ke Bot API
 _PTB_WRITE_TIMEOUT   = 90    # detik
@@ -237,9 +244,74 @@ async def _notify_progress(on_progress, text: str):
     if not on_progress:
         return
     try:
-        await on_progress(text)
+        await asyncio.wait_for(
+            on_progress(text),
+            timeout=_PROGRESS_CALLBACK_TIMEOUT,
+        )
     except Exception:
         pass
+
+
+async def _download_media(
+    client,
+    media,
+    file_name: str,
+    timeout: int,
+    operation: str,
+    progress=None,
+):
+    """
+    Download media dengan timeout total dan watchdog saat tidak ada chunk baru.
+
+    `asyncio.wait_for()` saja tidak cukup untuk beberapa kondisi koneksi
+    Pyrogram karena pembatalan coroutine dapat ikut tertahan. Task dipantau
+    dengan `asyncio.wait()` agar worker bisa membatalkan transfer tepat waktu.
+    """
+    last_chunk_at = time.monotonic()
+
+    async def _progress(current: int, total: int):
+        nonlocal last_chunk_at
+        last_chunk_at = time.monotonic()
+        if progress:
+            try:
+                await progress(current, total)
+            except Exception:
+                pass
+
+    task = asyncio.ensure_future(
+        client.download_media(
+            media,
+            file_name=file_name,
+            progress=_progress,
+        )
+    )
+    started_at = time.monotonic()
+    try:
+        while not task.done():
+            await asyncio.sleep(5)
+            now = time.monotonic()
+            if now - last_chunk_at >= _DOWNLOAD_STALL_TIMEOUT:
+                logger.warning(
+                    "%s stalled: no chunk for %ss",
+                    operation,
+                    _DOWNLOAD_STALL_TIMEOUT,
+                )
+                task.cancel()
+                task.add_done_callback(_consume_cancelled_task)
+                raise asyncio.TimeoutError(
+                    f"{operation} stalled after {_DOWNLOAD_STALL_TIMEOUT}s"
+                )
+            if now - started_at >= timeout:
+                logger.warning("%s timeout setelah %ss", operation, timeout)
+                task.cancel()
+                task.add_done_callback(_consume_cancelled_task)
+                raise asyncio.TimeoutError(f"{operation} timeout")
+        return task.result()
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            task.add_done_callback(_consume_cancelled_task)
+        raise
 
 
 async def copy_public_message(
@@ -673,10 +745,13 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
     thumbnail_path = None
     try:
         try:
-            path = await _hard_timeout(
-                client.download_media(msg, file_name=work_dir, progress=dl_cb),
+            path = await _download_media(
+                client,
+                msg,
+                file_name=work_dir,
                 timeout=_DOWNLOAD_TIMEOUT,
                 operation=f"download message {getattr(msg, 'id', '?')}",
+                progress=dl_cb,
             )
         except asyncio.TimeoutError:
             raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
@@ -684,6 +759,7 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
+        await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
         caption = _build_caption(msg.caption or "")
         # Thumbnail tidak wajib. FFmpeg dapat menahan worker setelah download
         # selesai, terutama pada video dengan metadata/container yang rusak.
@@ -840,12 +916,13 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             item_dir = _new_download_dir(user_chat_id)
             for _dl_attempt in range(2):
                 try:
-                    path = await _hard_timeout(
-                        client.download_media(
-                            m, file_name=item_dir, progress=dl_cb
-                        ),
+                    path = await _download_media(
+                        client,
+                        m,
+                        file_name=item_dir,
                         timeout=dl_timeout,
                         operation=f"download album item {i + 1}/{total}",
+                        progress=dl_cb,
                     )
                     if path and os.path.isfile(path) and os.path.getsize(path) > 0:
                         break
@@ -966,10 +1043,13 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
 
     try:
         try:
-            path = await _hard_timeout(
-                client.download_media(msg, file_name=work_dir, progress=dl_cb),
+            path = await _download_media(
+                client,
+                msg,
+                file_name=work_dir,
                 timeout=_DOWNLOAD_TIMEOUT,
                 operation=f"download message {getattr(msg, 'id', '?')}",
+                progress=dl_cb,
             )
         except asyncio.TimeoutError:
             raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
@@ -977,6 +1057,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
+        await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
         # Kirim ke chat bot (bukan Saved Messages).
         # Dari sudut pandang Pyrogram (login sebagai user), mengirim ke @bot_username
         # membuat file muncul langsung di chat antara user dan bot.
@@ -1246,12 +1327,13 @@ async def _send_album_individually(
         item_dir = _new_download_dir(user_chat_id)
         for _dl_attempt in range(2):
             try:
-                path = await _hard_timeout(
-                    client.download_media(
-                        m, file_name=item_dir, progress=dl_cb
-                    ),
+                path = await _download_media(
+                    client,
+                    m,
+                    file_name=item_dir,
                     timeout=dl_timeout,
                     operation=f"download album fallback item {i + 1}/{total}",
+                    progress=dl_cb,
                 )
                 if path and os.path.isfile(path) and os.path.getsize(path) > 0:
                     break
