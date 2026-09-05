@@ -6,6 +6,15 @@ from database.db import db
 from logger import logger
 
 
+def _consume_cancelled_task(task: asyncio.Task):
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except BaseException:
+        pass
+
+
 class SessionManager:
 
     def __init__(self):
@@ -14,6 +23,23 @@ class SessionManager:
         self._public_session: Client | None = None
         self._public_lock = asyncio.Lock()
         self._public_start_timeout = 30
+
+    async def _hard_timeout(self, awaitable, timeout: float, operation: str):
+        """Return on timeout without waiting for a stuck Pyrogram cancellation."""
+        task = asyncio.ensure_future(awaitable)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+        except BaseException:
+            if not task.done():
+                task.cancel()
+                task.add_done_callback(_consume_cancelled_task)
+            raise
+        if task in done:
+            return task.result()
+        logger.warning("%s timeout setelah %ss", operation, timeout)
+        task.cancel()
+        task.add_done_callback(_consume_cancelled_task)
+        raise asyncio.TimeoutError(f"{operation} timeout")
 
     def _lock(self, user_id: int) -> asyncio.Lock:
         if user_id not in self._locks:
@@ -27,7 +53,9 @@ class SessionManager:
                 if c.is_connected:
                     if c.me is None:
                         try:
-                            c.me = await c.get_me()
+                            c.me = await self._hard_timeout(
+                                c.get_me(), 20, f"get_me({user_id})"
+                            )
                         except Exception:
                             pass
                     return c
@@ -45,8 +73,12 @@ class SessionManager:
                     session_string=user["session_string"],
                     in_memory=True,
                 )
-                await client.connect()
-                client.me = await client.get_me()
+                await self._hard_timeout(
+                    client.connect(), 30, f"connect({user_id})"
+                )
+                client.me = await self._hard_timeout(
+                    client.get_me(), 20, f"get_me({user_id})"
+                )
                 self._sessions[user_id] = client
                 return client
 
@@ -76,9 +108,10 @@ class SessionManager:
                     bot_token=BOT_TOKEN,
                     in_memory=True,
                 )
-                await asyncio.wait_for(
+                await self._hard_timeout(
                     client.start(),
                     timeout=self._public_start_timeout,
+                    operation="public client.start()",
                 )
                 self._public_session = client
                 logger.info("Public Telegram session started")
@@ -87,7 +120,9 @@ class SessionManager:
                 logger.error(f"Public session error: {e}")
                 if client is not None:
                     try:
-                        await client.stop()
+                        await self._hard_timeout(
+                            client.stop(), 10, "public client.stop()"
+                        )
                     except Exception:
                         pass
                 return None

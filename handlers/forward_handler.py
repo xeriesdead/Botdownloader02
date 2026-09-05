@@ -21,7 +21,12 @@ from modules.social_downloader import (
     is_social_link,
 )
 from modules.quota_service import QuotaService
-from modules.safe_forward import SafeForward, check_channel_access, copy_public_message
+from modules.safe_forward import (
+    SafeForward,
+    check_channel_access,
+    copy_public_message,
+    _hard_timeout,
+)
 from modules.channel_guard import require_member
 from modules.activity_log import log as activity_log
 from database.db import db
@@ -413,9 +418,10 @@ def setup(app):
             # yang dapat membuat request publik terlihat macet.
             if not is_public_chat(chat):
                 try:
-                    uc_check = await asyncio.wait_for(
+                    uc_check = await _hard_timeout(
                         session_manager.get_for_chat(uid, chat),
                         timeout=_SESSION_LOOKUP_TIMEOUT,
+                        operation=f"session lookup user {uid}",
                     )
                 except asyncio.TimeoutError:
                     return await update.message.reply_text(
@@ -538,9 +544,10 @@ def setup(app):
                             if public_copy_failed
                             else session_manager.get_for_chat(uid, chat)
                         )
-                        uc = await asyncio.wait_for(
+                        uc = await _hard_timeout(
                             session_lookup,
                             timeout=_SESSION_LOOKUP_TIMEOUT,
+                            operation=f"session lookup user {uid}",
                         )
                         # Baru di sini proses benar-benar berjalan
                         await _edit_s(
@@ -558,7 +565,7 @@ def setup(app):
                             await _edit_s(message)
                             return
                         try:
-                            ok, reason = await asyncio.wait_for(
+                            ok, reason = await _hard_timeout(
                                 SafeForward.run(
                                     uc, bot, chat_id, chat, msg_id,
                                     on_progress=_progress,
@@ -567,6 +574,7 @@ def setup(app):
                                     single_only=single_only,
                                 ),
                                 timeout=_SINGLE_JOB_TIMEOUT,
+                                operation=f"forward message {msg_id}",
                             )
                         except asyncio.TimeoutError:
                             QuotaService.add_quota(uid, 1)
@@ -762,9 +770,10 @@ def setup(app):
 
                         # Fetch semua pesan sekaligus
                         try:
-                            bulk_chat_obj = await asyncio.wait_for(
+                            bulk_chat_obj = await _hard_timeout(
                                 uc.get_chat(chat_a),
                                 timeout=_BULK_FETCH_TIMEOUT,
+                                operation=f"bulk get_chat({chat_a})",
                             )
                             bulk_source_chat = getattr(bulk_chat_obj, "id", None) or chat_a
                         except asyncio.TimeoutError:
@@ -776,9 +785,10 @@ def setup(app):
                         all_msgs = []
                         for i in range(0, len(all_ids), 200):
                             chunk   = all_ids[i : i + 200]
-                            fetched = await asyncio.wait_for(
+                            fetched = await _hard_timeout(
                                 uc.get_messages(bulk_source_chat, chunk),
                                 timeout=_BULK_FETCH_TIMEOUT,
+                                operation=f"bulk get_messages({bulk_source_chat})",
                             )
                             if isinstance(fetched, list):
                                 all_msgs.extend(fetched)

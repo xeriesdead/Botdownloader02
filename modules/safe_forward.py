@@ -186,6 +186,43 @@ _PTB_READ_TIMEOUT    = 60    # detik
 _PTB_CONNECT_TIMEOUT = 15    # detik
 
 
+def _consume_cancelled_task(task: asyncio.Task):
+    """Konsumsi hasil task yang dibatalkan agar tidak menghasilkan warning."""
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except BaseException:
+        pass
+
+
+async def _hard_timeout(awaitable, timeout: float, operation: str):
+    """
+    Timeout yang tidak menunggu coroutine Pyrogram selesai dibatalkan.
+
+    Beberapa operasi Pyrogram dapat menahan pembatalan saat koneksi MTProto
+    macet. `asyncio.wait_for()` ikut menunggu proses pembatalan tersebut,
+    sehingga worker terlihat stuck. Dengan `asyncio.wait()`, worker kembali
+    tepat setelah batas waktu dan task yang macet dibersihkan saat selesai.
+    """
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            task.add_done_callback(_consume_cancelled_task)
+        raise
+
+    if task in done:
+        return task.result()
+
+    logger.warning("%s timeout setelah %ss", operation, timeout)
+    task.cancel()
+    task.add_done_callback(_consume_cancelled_task)
+    raise asyncio.TimeoutError(f"{operation} timeout")
+
+
 def _new_download_dir(user_chat_id: int) -> str:
     """Buat direktori sementara yang bisa dihapus utuh setelah satu job."""
     os.makedirs("downloads", exist_ok=True)
@@ -287,7 +324,11 @@ async def check_channel_access(client, chat) -> tuple[bool, str]:
     """
     label = f"ID {chat}" if isinstance(chat, int) else str(chat)
     try:
-        await asyncio.wait_for(client.get_chat(chat), timeout=_ACCESS_CHECK_TIMEOUT)
+        await _hard_timeout(
+            client.get_chat(chat),
+            timeout=_ACCESS_CHECK_TIMEOUT,
+            operation=f"get_chat({chat})",
+        )
         return True, ""
     except asyncio.TimeoutError:
         return False, (
@@ -319,8 +360,10 @@ async def _is_forwards_restricted(client, chat) -> bool:
     if cache_key in _forwards_restricted_cache:
         return _forwards_restricted_cache[cache_key]
     try:
-        chat_obj = await asyncio.wait_for(
-            client.get_chat(chat), timeout=_PEER_RESOLVE_TIMEOUT
+        chat_obj = await _hard_timeout(
+            client.get_chat(chat),
+            timeout=_PEER_RESOLVE_TIMEOUT,
+            operation=f"get_chat({chat})",
         )
         restricted = bool(getattr(chat_obj, "has_protected_content", False))
         _forwards_restricted_cache[cache_key] = restricted
@@ -339,8 +382,10 @@ async def _resolve_source(client, chat) -> tuple[object | None, str | None]:
     """Resolve source chat. Return a stable numeric chat ID when available."""
     label = chat if isinstance(chat, str) else f"ID {chat}"
     try:
-        chat_obj = await asyncio.wait_for(
-            client.get_chat(chat), timeout=_PEER_RESOLVE_TIMEOUT
+        chat_obj = await _hard_timeout(
+            client.get_chat(chat),
+            timeout=_PEER_RESOLVE_TIMEOUT,
+            operation=f"get_chat({chat})",
         )
         # get_messages() with a username can trigger a second username lookup
         # in Pyrogram. Reuse Telegram's numeric ID to avoid that network path.
@@ -372,13 +417,15 @@ async def _get_message_via_raw_api(client, chat, msg_id: int):
     berhenti setelah peer berhasil di-resolve. Raw channels.getMessages /
     messages.getMessages menghindari lookup wrapper tersebut.
     """
-    peer = await asyncio.wait_for(
-        client.resolve_peer(chat), timeout=_PEER_RESOLVE_TIMEOUT
+    peer = await _hard_timeout(
+        client.resolve_peer(chat),
+        timeout=_PEER_RESOLVE_TIMEOUT,
+        operation=f"resolve_peer({chat})",
     )
     message_id = raw.types.InputMessageID(id=msg_id)
 
     if isinstance(peer, raw.types.InputPeerChannel):
-        result = await asyncio.wait_for(
+        result = await _hard_timeout(
             client.invoke(
                 raw.functions.channels.GetMessages(
                     channel=peer,
@@ -386,15 +433,17 @@ async def _get_message_via_raw_api(client, chat, msg_id: int):
                 )
             ),
             timeout=_MSG_FETCH_TIMEOUT,
+            operation=f"channels.getMessages({chat}, {msg_id})",
         )
     else:
-        result = await asyncio.wait_for(
+        result = await _hard_timeout(
             client.invoke(
                 raw.functions.messages.GetMessages(
                     id=[message_id],
                 )
             ),
             timeout=_MSG_FETCH_TIMEOUT,
+            operation=f"messages.getMessages({chat}, {msg_id})",
         )
 
     messages = getattr(result, "messages", None) or []
@@ -427,8 +476,10 @@ async def _get_message(client, chat, msg_id: int):
             "Raw get message gagal untuk %s/%s, coba wrapper Pyrogram: %s",
             chat, msg_id, raw_error,
         )
-        return await asyncio.wait_for(
-            client.get_messages(chat, msg_id), timeout=_MSG_FETCH_TIMEOUT
+        return await _hard_timeout(
+            client.get_messages(chat, msg_id),
+            timeout=_MSG_FETCH_TIMEOUT,
+            operation=f"get_messages({chat}, {msg_id})",
         )
 
 
@@ -622,9 +673,10 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
     thumbnail_path = None
     try:
         try:
-            path = await asyncio.wait_for(
+            path = await _hard_timeout(
                 client.download_media(msg, file_name=work_dir, progress=dl_cb),
                 timeout=_DOWNLOAD_TIMEOUT,
+                operation=f"download message {getattr(msg, 'id', '?')}",
             )
         except asyncio.TimeoutError:
             raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
@@ -633,9 +685,9 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
         caption = _build_caption(msg.caption or "")
-        thumbnail_path = (
-            await _create_video_thumbnail_async(path) if msg.video else None
-        )
+        # Thumbnail tidak wajib. FFmpeg dapat menahan worker setelah download
+        # selesai, terutama pada video dengan metadata/container yang rusak.
+        thumbnail_path = None
         metadata = _video_metadata(msg)
         _kw = dict(
             write_timeout=_PTB_WRITE_TIMEOUT,
@@ -731,9 +783,10 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
     """
     if messages is None:
         try:
-            msgs = await asyncio.wait_for(
-                client.get_media_group(chat, msg_id),
-                timeout=_ALBUM_FETCH_TIMEOUT,
+                msgs = await _hard_timeout(
+                    client.get_media_group(chat, msg_id),
+                    timeout=_ALBUM_FETCH_TIMEOUT,
+                    operation=f"get_media_group({chat}, {msg_id})",
             )
         except asyncio.TimeoutError:
             raise RuntimeError(
@@ -787,11 +840,12 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             item_dir = _new_download_dir(user_chat_id)
             for _dl_attempt in range(2):
                 try:
-                    path = await asyncio.wait_for(
+                    path = await _hard_timeout(
                         client.download_media(
                             m, file_name=item_dir, progress=dl_cb
                         ),
                         timeout=dl_timeout,
+                        operation=f"download album item {i + 1}/{total}",
                     )
                     if path and os.path.isfile(path) and os.path.getsize(path) > 0:
                         break
@@ -817,29 +871,16 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             if m.photo:
                 media_items.append(InputMediaPhoto(media=f, caption=caption))
             elif m.video:
-                thumb_path = await _create_video_thumbnail_async(path)
-                if thumb_path:
-                    thumbnail_paths.append(thumb_path)
-                    thumb = open(thumb_path, "rb")
-                    thumbnail_handles.append(thumb)
-                    media_items.append(
-                        InputMediaVideo(
-                            media=f,
-                            caption=caption,
-                            thumbnail=thumb,
-                            supports_streaming=True,
-                            **_video_metadata(m),
-                        )
+                # Thumbnail bersifat opsional dan tidak boleh menghambat
+                # pengiriman album setelah file berhasil di-download.
+                media_items.append(
+                    InputMediaVideo(
+                        media=f,
+                        caption=caption,
+                        supports_streaming=True,
+                        **_video_metadata(m),
                     )
-                else:
-                    media_items.append(
-                        InputMediaVideo(
-                            media=f,
-                            caption=caption,
-                            supports_streaming=True,
-                            **_video_metadata(m),
-                        )
-                    )
+                )
             elif m.audio:
                 media_items.append(InputMediaAudio(media=f, caption=caption))
             elif m.animation:
@@ -901,7 +942,11 @@ async def _pyrogram_copy_with_notice(client, bot, msg, user_chat_id: int, file_s
     Pyrogram meng-copy langsung ke chat bot user via MTProto (bypass batas 50 MB Bot API).
     """
     bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
-    await msg.copy(bot_peer)
+    await _hard_timeout(
+        msg.copy(bot_peer),
+        timeout=_UPLOAD_TIMEOUT,
+        operation=f"copy message {getattr(msg, 'id', '?')}",
+    )
 
 
 async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
@@ -921,9 +966,10 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
 
     try:
         try:
-            path = await asyncio.wait_for(
+            path = await _hard_timeout(
                 client.download_media(msg, file_name=work_dir, progress=dl_cb),
                 timeout=_DOWNLOAD_TIMEOUT,
+                operation=f"download message {getattr(msg, 'id', '?')}",
             )
         except asyncio.TimeoutError:
             raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
@@ -940,19 +986,17 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
         caption = _build_caption(msg.caption or "")
         # Thumbnail tidak wajib dan proses FFmpeg tambahan berisiko memakai RAM
         # besar untuk video ratusan MB. Video tetap bisa dikirim tanpa thumbnail.
-        thumbnail_path = (
-            await _create_video_thumbnail_async(path)
-            if msg.video and file_size <= 50 * 1024 * 1024
-            else None
-        )
+        # Thumbnail tidak wajib dan FFmpeg tidak boleh menahan pengiriman.
+        thumbnail_path = None
         metadata = _video_metadata(msg)
         if msg.photo:
-            await asyncio.wait_for(
+            await _hard_timeout(
                 client.send_photo(bot_peer, path, caption=caption, progress=ul_cb),
                 timeout=_UPLOAD_TIMEOUT,
+                operation="Pyrogram send_photo",
             )
         elif msg.video:
-            await asyncio.wait_for(
+            await _hard_timeout(
                 client.send_video(
                     bot_peer,
                     path,
@@ -963,36 +1007,43 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     **metadata,
                 ),
                 timeout=_UPLOAD_TIMEOUT,
+                operation="Pyrogram send_video",
             )
         elif msg.audio:
-            await asyncio.wait_for(
+            await _hard_timeout(
                 client.send_audio(bot_peer, path, caption=caption, progress=ul_cb),
                 timeout=_UPLOAD_TIMEOUT,
+                operation="Pyrogram send_audio",
             )
         elif msg.voice:
-            await asyncio.wait_for(
+            await _hard_timeout(
                 client.send_voice(bot_peer, path, caption=caption, progress=ul_cb),
                 timeout=_UPLOAD_TIMEOUT,
+                operation="Pyrogram send_voice",
             )
         elif msg.video_note:
-            await asyncio.wait_for(
+            await _hard_timeout(
                 client.send_video_note(bot_peer, path, progress=ul_cb),
                 timeout=_UPLOAD_TIMEOUT,
+                operation="Pyrogram send_video_note",
             )
         elif msg.animation:
-            await asyncio.wait_for(
+            await _hard_timeout(
                 client.send_animation(bot_peer, path, caption=caption, progress=ul_cb),
                 timeout=_UPLOAD_TIMEOUT,
+                operation="Pyrogram send_animation",
             )
         elif msg.sticker:
-            await asyncio.wait_for(
+            await _hard_timeout(
                 client.send_sticker(bot_peer, path, progress=ul_cb),
                 timeout=_UPLOAD_TIMEOUT,
+                operation="Pyrogram send_sticker",
             )
         else:
-            await asyncio.wait_for(
+            await _hard_timeout(
                 client.send_document(bot_peer, path, caption=caption, progress=ul_cb),
                 timeout=_UPLOAD_TIMEOUT,
+                operation="Pyrogram send_document",
             )
     finally:
         if thumbnail_path:
@@ -1010,9 +1061,8 @@ async def _send_album_item(
     caption = _build_caption(msg.caption or "")
     file_size = _get_file_size(msg) or 0
     bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
-    thumbnail_path = (
-        await _create_video_thumbnail_async(path) if msg.video else None
-    )
+    # Thumbnail tidak wajib; jalur fallback harus fokus mengirim media.
+    thumbnail_path = None
     metadata = _video_metadata(msg)
     _kw = dict(
         write_timeout=_PTB_WRITE_TIMEOUT,
@@ -1023,12 +1073,13 @@ async def _send_album_item(
     try:
         if file_size > _BOT_API_UPLOAD_LIMIT:
             if msg.photo:
-                await asyncio.wait_for(
+                await _hard_timeout(
                     client.send_photo(bot_peer, path, caption=caption),
                     timeout=_UPLOAD_TIMEOUT,
+                    operation="Pyrogram album send_photo",
                 )
             elif msg.video:
-                await asyncio.wait_for(
+                await _hard_timeout(
                     client.send_video(
                         bot_peer,
                         path,
@@ -1038,31 +1089,37 @@ async def _send_album_item(
                         **metadata,
                     ),
                     timeout=_UPLOAD_TIMEOUT,
+                    operation="Pyrogram album send_video",
                 )
             elif msg.audio:
-                await asyncio.wait_for(
+                await _hard_timeout(
                     client.send_audio(bot_peer, path, caption=caption),
                     timeout=_UPLOAD_TIMEOUT,
+                    operation="Pyrogram album send_audio",
                 )
             elif msg.voice:
-                await asyncio.wait_for(
+                await _hard_timeout(
                     client.send_voice(bot_peer, path, caption=caption),
                     timeout=_UPLOAD_TIMEOUT,
+                    operation="Pyrogram album send_voice",
                 )
             elif msg.video_note:
-                await asyncio.wait_for(
+                await _hard_timeout(
                     client.send_video_note(bot_peer, path),
                     timeout=_UPLOAD_TIMEOUT,
+                    operation="Pyrogram album send_video_note",
                 )
             elif msg.animation:
-                await asyncio.wait_for(
+                await _hard_timeout(
                     client.send_animation(bot_peer, path, caption=caption),
                     timeout=_UPLOAD_TIMEOUT,
+                    operation="Pyrogram album send_animation",
                 )
             else:
-                await asyncio.wait_for(
+                await _hard_timeout(
                     client.send_document(bot_peer, path, caption=caption),
                     timeout=_UPLOAD_TIMEOUT,
+                    operation="Pyrogram album send_document",
                 )
             return
 
@@ -1138,9 +1195,10 @@ async def _send_album_individually(
     on_progress: async callable(text: str) untuk update status (opsional).
     """
     try:
-        msgs = await asyncio.wait_for(
+        msgs = await _hard_timeout(
             client.get_media_group(chat, msg_id),
             timeout=_ALBUM_FETCH_TIMEOUT,
+            operation=f"get_media_group({chat}, {msg_id})",
         )
     except Exception as e:
         return False, f"Gagal mengambil album: {e}"
@@ -1188,11 +1246,12 @@ async def _send_album_individually(
         item_dir = _new_download_dir(user_chat_id)
         for _dl_attempt in range(2):
             try:
-                path = await asyncio.wait_for(
+                path = await _hard_timeout(
                     client.download_media(
                         m, file_name=item_dir, progress=dl_cb
                     ),
                     timeout=dl_timeout,
+                    operation=f"download album fallback item {i + 1}/{total}",
                 )
                 if path and os.path.isfile(path) and os.path.getsize(path) > 0:
                     break
@@ -1264,9 +1323,10 @@ async def _send_album_individually(
 async def _fetch_album_messages(client, chat, msg_id: int):
     """Ambil metadata album sekali dengan batas waktu yang tegas."""
     try:
-        return await asyncio.wait_for(
+        return await _hard_timeout(
             client.get_media_group(chat, msg_id),
             timeout=_ALBUM_FETCH_TIMEOUT,
+            operation=f"get_media_group({chat}, {msg_id})",
         )
     except asyncio.TimeoutError:
         raise RuntimeError(
@@ -1599,9 +1659,10 @@ class SafeForward:
             except FileReferenceExpired:
                 if attempt < MAX_RETRIES:
                     try:
-                        msg = await asyncio.wait_for(
+                        msg = await _hard_timeout(
                             client.get_messages(chat, msg_id),
                             timeout=_MSG_FETCH_TIMEOUT,
+                            operation=f"refresh get_messages({chat}, {msg_id})",
                         )
                         await asyncio.sleep(1)
                     except Exception:
