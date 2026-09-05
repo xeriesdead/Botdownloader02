@@ -180,12 +180,13 @@ _PEER_RESOLVE_TIMEOUT  = 20   # detik — batas waktu resolve peer & get_chat
 _MSG_FETCH_TIMEOUT     = 25   # detik — batas waktu get_messages
 _ACCESS_CHECK_TIMEOUT  = 12   # detik — batas waktu pre-flight cek akses channel
 _DOWNLOAD_TIMEOUT      = 120  # detik — batas waktu download satu file via Pyrogram (2 menit)
-_DOWNLOAD_STALL_TIMEOUT = 45  # detik tanpa chunk baru sebelum transfer dibatalkan
+_DOWNLOAD_STALL_TIMEOUT = 45  # detik tanpa byte baru sebelum transfer dibatalkan
 _UPLOAD_TIMEOUT        = 300  # detik — batas waktu upload satu file ke Bot API (5 menit)
 _ALBUM_FETCH_TIMEOUT   = 30   # detik — batas waktu mengambil metadata album
 _ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file — dipakai di _send_album_via_bot
 _BOT_COPY_TIMEOUT      = 30   # detik — jalur cepat untuk pesan channel publik
 _PROGRESS_CALLBACK_TIMEOUT = 5  # update status tidak boleh menahan transfer
+_TRANSFER_POLL_INTERVAL = 2  # detik — frekuensi pemeriksaan watchdog transfer
 
 # Timeout PTB untuk operasi upload ke Bot API
 _PTB_WRITE_TIMEOUT   = 90    # detik
@@ -252,49 +253,47 @@ async def _notify_progress(on_progress, text: str):
         pass
 
 
-async def _download_media(
-    client,
-    media,
-    file_name: str,
+async def _run_transfer_with_watchdog(
+    factory,
     timeout: int,
     operation: str,
     progress=None,
 ):
     """
-    Download media dengan timeout total dan watchdog saat tidak ada chunk baru.
+    Jalankan transfer Pyrogram dengan timeout total dan timeout saat byte tidak
+    bertambah.
 
-    `asyncio.wait_for()` saja tidak cukup untuk beberapa kondisi koneksi
-    Pyrogram karena pembatalan coroutine dapat ikut tertahan. Task dipantau
-    dengan `asyncio.wait()` agar worker bisa membatalkan transfer tepat waktu.
+    Pyrogram dapat memanggil callback berulang kali dengan posisi byte yang
+    sama ketika sedang retry pada chunk yang gagal. Callback saja tidak cukup
+    sebagai tanda koneksi masih hidup; watchdog hanya di-reset jika posisi
+    transfer benar-benar berubah.
     """
-    last_chunk_at = time.monotonic()
+    last_progress_at = time.monotonic()
+    last_position = None
 
     async def _progress(current: int, total: int):
-        nonlocal last_chunk_at
-        last_chunk_at = time.monotonic()
+        nonlocal last_progress_at, last_position
+        if current != last_position:
+            last_position = current
+            last_progress_at = time.monotonic()
         if progress:
             try:
                 await progress(current, total)
             except Exception:
                 pass
 
-    task = asyncio.ensure_future(
-        client.download_media(
-            media,
-            file_name=file_name,
-            progress=_progress,
-        )
-    )
+    task = asyncio.ensure_future(factory(_progress))
     started_at = time.monotonic()
     try:
         while not task.done():
-            await asyncio.sleep(5)
+            await asyncio.sleep(_TRANSFER_POLL_INTERVAL)
             now = time.monotonic()
-            if now - last_chunk_at >= _DOWNLOAD_STALL_TIMEOUT:
+            if now - last_progress_at >= _DOWNLOAD_STALL_TIMEOUT:
                 logger.warning(
-                    "%s stalled: no chunk for %ss",
+                    "%s stalled: no byte progress for %ss (position=%s)",
                     operation,
                     _DOWNLOAD_STALL_TIMEOUT,
+                    last_position,
                 )
                 task.cancel()
                 task.add_done_callback(_consume_cancelled_task)
@@ -312,6 +311,27 @@ async def _download_media(
             task.cancel()
             task.add_done_callback(_consume_cancelled_task)
         raise
+
+
+async def _download_media(
+    client,
+    media,
+    file_name: str,
+    timeout: int,
+    operation: str,
+    progress=None,
+):
+    """Download media via Pyrogram dengan watchdog transfer yang nyata."""
+    return await _run_transfer_with_watchdog(
+        lambda transfer_progress: client.download_media(
+            media,
+            file_name=file_name,
+            progress=transfer_progress,
+        ),
+        timeout=timeout,
+        operation=operation,
+        progress=progress,
+    )
 
 
 async def copy_public_message(
@@ -1073,60 +1093,101 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
         thumbnail_path = None
         metadata = _video_metadata(msg)
         if msg.photo:
-            await _hard_timeout(
-                client.send_photo(bot_peer, path, caption=caption, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_photo(
+                    bot_peer,
+                    path,
+                    caption=caption,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_photo",
+                progress=ul_cb,
             )
         elif msg.video:
-            await _hard_timeout(
-                client.send_video(
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_video(
                     bot_peer,
                     path,
                     caption=caption,
                     supports_streaming=True,
                     thumb=thumbnail_path,
-                    progress=ul_cb,
+                    progress=transfer_progress,
                     **metadata,
                 ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_video",
+                progress=ul_cb,
             )
         elif msg.audio:
-            await _hard_timeout(
-                client.send_audio(bot_peer, path, caption=caption, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_audio(
+                    bot_peer,
+                    path,
+                    caption=caption,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_audio",
+                progress=ul_cb,
             )
         elif msg.voice:
-            await _hard_timeout(
-                client.send_voice(bot_peer, path, caption=caption, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_voice(
+                    bot_peer,
+                    path,
+                    caption=caption,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_voice",
+                progress=ul_cb,
             )
         elif msg.video_note:
-            await _hard_timeout(
-                client.send_video_note(bot_peer, path, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_video_note(
+                    bot_peer,
+                    path,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_video_note",
+                progress=ul_cb,
             )
         elif msg.animation:
-            await _hard_timeout(
-                client.send_animation(bot_peer, path, caption=caption, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_animation(
+                    bot_peer,
+                    path,
+                    caption=caption,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_animation",
+                progress=ul_cb,
             )
         elif msg.sticker:
-            await _hard_timeout(
-                client.send_sticker(bot_peer, path, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_sticker(
+                    bot_peer,
+                    path,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_sticker",
+                progress=ul_cb,
             )
         else:
-            await _hard_timeout(
-                client.send_document(bot_peer, path, caption=caption, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_document(
+                    bot_peer,
+                    path,
+                    caption=caption,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_document",
+                progress=ul_cb,
             )
     except asyncio.TimeoutError as exc:
         raise RuntimeError(
