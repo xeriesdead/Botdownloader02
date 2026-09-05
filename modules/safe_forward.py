@@ -1750,13 +1750,20 @@ class SafeForward:
                         # Tidak ada batasan ukuran (file tidak di-download),
                         # tidak masuk Saved Messages karena dikirim dari bot.
                         try:
-                            await bot.copy_message(
-                                chat_id=user_chat_id,
-                                from_chat_id=chat,
-                                message_id=msg_id,
+                            await _hard_timeout(
+                                bot.copy_message(
+                                    chat_id=user_chat_id,
+                                    from_chat_id=chat,
+                                    message_id=msg_id,
+                                    write_timeout=_PTB_WRITE_TIMEOUT,
+                                    read_timeout=_PTB_READ_TIMEOUT,
+                                    connect_timeout=_PTB_CONNECT_TIMEOUT,
+                                ),
+                                timeout=_BOT_COPY_TIMEOUT,
+                                operation=f"copy_message({chat}, {msg_id})",
                             )
                             return True, None
-                        except (BadRequest, Forbidden):
+                        except (BadRequest, Forbidden, asyncio.TimeoutError):
                             # Bot tidak bisa akses source (private / restricted)
                             if is_large:
                                 # File >50 MB — tidak bisa di-re-upload via Bot API
@@ -1810,6 +1817,38 @@ class SafeForward:
                         pass
                 else:
                     return False, "File reference kedaluwarsa. Coba lagi nanti."
+
+            except asyncio.TimeoutError as e:
+                # Jangan mengulang seluruh download setelah transfer Telegram
+                # benar-benar timeout. Pada file besar, retry seperti ini hanya
+                # membuat user menunggu berulang kali dan dapat memperpanjang
+                # job sampai timeout queue tanpa hasil baru.
+                logger.error(
+                    "transfer timeout msg %s attempt %s: %s",
+                    msg_id,
+                    attempt + 1,
+                    e,
+                )
+                return False, "Transfer Telegram timeout — coba lagi beberapa saat lagi."
+
+            except RuntimeError as e:
+                error_text = str(e)
+                if "timeout" in error_text.lower():
+                    # Kedua helper upload membungkus timeout agar pesan user
+                    # mudah dipahami. Perlakukan timeout sebagai hasil akhir,
+                    # bukan alasan mengunduh ulang media dari awal.
+                    logger.error(
+                        "transfer runtime timeout msg %s attempt %s: %s",
+                        msg_id,
+                        attempt + 1,
+                        error_text,
+                    )
+                    return False, error_text
+                logger.error(f"send error msg {msg_id} attempt {attempt}: {e}")
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(1 + random.uniform(0, 1))
+                else:
+                    return False, f"Gagal mengirim: {e}"
 
             except Exception as e:
                 logger.error(f"send error msg {msg_id} attempt {attempt}: {e}")
