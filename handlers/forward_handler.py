@@ -472,8 +472,6 @@ def setup(app):
                 except Exception as exc:
                     logger.debug("Gagal update status message %s: %s", pmsg_id, exc)
 
-            last_progress = [time.monotonic()]
-
             async def single_job():
                 uc = None
                 async def _heartbeat():

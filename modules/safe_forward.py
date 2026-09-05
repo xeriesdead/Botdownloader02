@@ -840,6 +840,10 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                     bot.send_document(user_chat_id, document=f, caption=caption, **_kw),
                     timeout=_UPLOAD_TIMEOUT,
                 )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            "Upload timeout — koneksi ke Telegram terlalu lambat. Coba lagi."
+        ) from exc
     finally:
         if thumbnail_path:
             try:
@@ -906,12 +910,10 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                     file_size,
                 )
             elif on_progress:
-                try:
-                    await on_progress(
-                        f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})"
-                    )
-                except Exception:
-                    pass
+                await _notify_progress(
+                    on_progress,
+                    f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})",
+                )
             path = None
             item_dir = _new_download_dir(user_chat_id)
             for _dl_attempt in range(2):
@@ -972,10 +974,10 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
 
         if media_items:
             if on_progress:
-                try:
-                    await on_progress(f"📤 <b>Mengirim album...</b> ({len(paths)}/{total})")
-                except Exception:
-                    pass
+                await _notify_progress(
+                    on_progress,
+                    f"📤 <b>Mengirim album...</b> ({len(paths)}/{total})",
+                )
             # Timeout proporsional: 120 detik per file + 60 detik buffer
             _album_timeout = len(paths) * _ALBUM_UPLOAD_TIMEOUT_PER_FILE + 60
             await asyncio.wait_for(
@@ -1126,6 +1128,10 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_document",
             )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            "Upload timeout — koneksi Telegram terlalu lambat. Coba lagi."
+        ) from exc
     finally:
         if thumbnail_path:
             try:
@@ -1317,12 +1323,10 @@ async def _send_album_individually(
                 file_size,
             )
         elif on_progress:
-            try:
-                await on_progress(
-                    f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})"
-                )
-            except Exception:
-                pass
+            await _notify_progress(
+                on_progress,
+                f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})",
+            )
         path = None
         item_dir = _new_download_dir(user_chat_id)
         for _dl_attempt in range(2):
@@ -1672,20 +1676,13 @@ class SafeForward:
             try:
                 if msg.media:
                     if is_restricted:
-                        # Channel noforwards: skip copy_message & pyrogram copy —
-                        # keduanya akan ditolak Telegram. Langsung download + upload.
-                        if is_large:
-                            # File >50 MB: download via Pyrogram, upload ulang via Pyrogram MTProto
-                            # (bukan Bot API — tidak ada batas 50 MB), kirim ke Saved Messages user.
-                            await _download_and_upload_via_pyrogram(
-                                client, bot, msg, user_chat_id, file_size,
-                                on_progress=on_progress,
-                            )
-                        else:
-                            await _download_and_send_via_bot(
-                                client, bot, msg, user_chat_id,
-                                on_progress=on_progress,
-                            )
+                        # Channel noforwards: setelah download, selalu upload ulang
+                        # lewat Pyrogram MTProto. Bot API multipart sering macet pada
+                        # video 30–50 MB walaupun masih di bawah batas 50 MB.
+                        await _download_and_upload_via_pyrogram(
+                            client, bot, msg, user_chat_id, file_size,
+                            on_progress=on_progress,
+                        )
                         return True, None
                     else:
                         # Fast path: PTB bot.copy_message
@@ -1708,9 +1705,10 @@ class SafeForward:
                                 )
                                 return True, None
                             else:
-                                # File ≤50 MB — download Pyrogram, upload via bot
-                                await _download_and_send_via_bot(
-                                    client, bot, msg, user_chat_id,
+                                # Jika copy bot gagal, gunakan jalur MTProto
+                                # yang sama agar upload tidak tersangkut Bot API.
+                                await _download_and_upload_via_pyrogram(
+                                    client, bot, msg, user_chat_id, file_size,
                                     on_progress=on_progress,
                                 )
                                 return True, None
