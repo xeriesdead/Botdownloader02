@@ -1,2 +1,3 @@
 - [Railway native Python builds](railway-native-builds.md) — use the project Dockerfile when dependencies require compiled native extensions such as tgcrypto.
 - [GitHub push path](github-push-path.md) — use the attached GitHub integration API when local Git HTTPS authentication fails.
+- [Telegram video thumbnails](telegram-video-thumbnails.md) — detect video documents and attach generated previews when re-uploading protected media.
