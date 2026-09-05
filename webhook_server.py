@@ -127,7 +127,7 @@ async def on_startup(app: web.Application):
     await queue_manager.start()
 
     me = await application.bot.get_me()
-    set_bot_username(me.username)
+    set_bot_username(me.username, me.id)
     logger.info(f"Bot started (webhook mode): @{me.username} (id={me.id})")
     print(f"✅ Bot running (webhook mode): @{me.username}")
 
