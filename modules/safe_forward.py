@@ -43,13 +43,25 @@ FLOOD_LIMIT = 60
 # Batas upload ulang via Bot API (file di atas ini tidak bisa di-re-upload oleh bot)
 _BOT_API_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
 
-# Username bot — diset sekali saat startup via set_bot_username()
+# Identitas bot — diset sekali saat startup.
 _BOT_USERNAME: str = ""
+_BOT_USER_ID: int | None = None
 
 
-def set_bot_username(username: str):
-    global _BOT_USERNAME
+def set_bot_username(username: str, user_id: int | None = None):
+    global _BOT_USERNAME, _BOT_USER_ID
     _BOT_USERNAME = username
+    if user_id:
+        _BOT_USER_ID = int(user_id)
+
+
+def _bot_peer():
+    """Kembalikan peer bot yang stabil untuk session user Pyrogram."""
+    if _BOT_USER_ID:
+        return _BOT_USER_ID
+    if _BOT_USERNAME:
+        return f"@{_BOT_USERNAME}"
+    raise RuntimeError("Identitas bot belum siap untuk upload Telegram.")
 
 
 def _build_caption(original: str) -> str:
@@ -229,6 +241,24 @@ async def _hard_timeout(awaitable, timeout: float, operation: str):
     task.cancel()
     task.add_done_callback(_consume_cancelled_task)
     raise asyncio.TimeoutError(f"{operation} timeout")
+
+
+async def _prepare_bot_peer(client):
+    """
+    Resolve peer bot sebelum transfer media dimulai.
+
+    Upload sebelumnya memakai username langsung di dalam send_video(). Pada
+    session user yang hanya connect() (tanpa start()), resolusi peer dapat
+    berhenti sebelum callback upload pertama. Resolve sekali dengan timeout dan
+    gunakan ID numerik yang sudah masuk peer cache Pyrogram.
+    """
+    peer = _bot_peer()
+    await _hard_timeout(
+        client.resolve_peer(peer),
+        timeout=_PEER_RESOLVE_TIMEOUT,
+        operation=f"resolve bot peer {peer}",
+    )
+    return _BOT_USER_ID or peer
 
 
 def _new_download_dir(user_chat_id: int) -> str:
@@ -746,6 +776,69 @@ def _video_metadata(msg) -> dict:
     return metadata
 
 
+async def _send_downloaded_file_via_bot(
+    bot, msg, user_chat_id: int, path: str, on_progress=None,
+):
+    """
+    Kirim file yang sudah ada ke user lewat Bot API.
+
+    Video sengaja dikirim sebagai document pada jalur ini. Itu menghindari
+    tahap pemrosesan video Bot API yang tidak diperlukan untuk mengambil media
+    dari channel dan membuat upload 30–50 MB lebih deterministik.
+    """
+    await _notify_progress(on_progress, "📤 <b>Mengirim media via Bot API...</b>")
+    caption = _build_caption(msg.caption or "")
+    kw = dict(
+        write_timeout=_PTB_WRITE_TIMEOUT,
+        read_timeout=_PTB_READ_TIMEOUT,
+        connect_timeout=_PTB_CONNECT_TIMEOUT,
+    )
+
+    with open(path, "rb") as media_file:
+        if msg.photo:
+            await asyncio.wait_for(
+                bot.send_photo(
+                    user_chat_id, photo=media_file, caption=caption, **kw
+                ),
+                timeout=_UPLOAD_TIMEOUT,
+            )
+        elif msg.audio:
+            await asyncio.wait_for(
+                bot.send_audio(
+                    user_chat_id, audio=media_file, caption=caption, **kw
+                ),
+                timeout=_UPLOAD_TIMEOUT,
+            )
+        elif msg.voice:
+            await asyncio.wait_for(
+                bot.send_voice(
+                    user_chat_id, voice=media_file, caption=caption, **kw
+                ),
+                timeout=_UPLOAD_TIMEOUT,
+            )
+        elif msg.video_note:
+            await asyncio.wait_for(
+                bot.send_video_note(
+                    user_chat_id, video_note=media_file, **kw
+                ),
+                timeout=_UPLOAD_TIMEOUT,
+            )
+        elif msg.animation:
+            await asyncio.wait_for(
+                bot.send_animation(
+                    user_chat_id, animation=media_file, caption=caption, **kw
+                ),
+                timeout=_UPLOAD_TIMEOUT,
+            )
+        else:
+            await asyncio.wait_for(
+                bot.send_document(
+                    user_chat_id, document=media_file, caption=caption, **kw
+                ),
+                timeout=_UPLOAD_TIMEOUT,
+            )
+
+
 async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                                      on_progress=None):
     """
@@ -1040,10 +1133,10 @@ async def _pyrogram_copy_with_notice(client, bot, msg, user_chat_id: int, file_s
     Fallback untuk file besar (>50 MB) di channel private yang TIDAK restricted:
     Pyrogram meng-copy langsung ke chat bot user via MTProto (bypass batas 50 MB Bot API).
     """
-    bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+    bot_peer = await _prepare_bot_peer(client)
     await _hard_timeout(
         msg.copy(bot_peer),
-        timeout=_UPLOAD_TIMEOUT,
+        timeout=_BOT_COPY_TIMEOUT,
         operation=f"copy message {getattr(msg, 'id', '?')}",
     )
 
@@ -1079,11 +1172,30 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
-        await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
+        # File di bawah batas Bot API tidak perlu melewati upload MTProto
+        # session-user. Jalur ini juga tidak membuat bot peer baru dari dalam
+        # send_video(), yang sebelumnya menjadi titik macet pada private /get.
+        if file_size and file_size <= _BOT_API_UPLOAD_LIMIT:
+            try:
+                await _send_downloaded_file_via_bot(
+                    bot, msg, user_chat_id, path, on_progress=on_progress,
+                )
+                return
+            except (BadRequest, Forbidden) as exc:
+                logger.warning(
+                    "Bot API upload gagal untuk msg %s, fallback ke MTProto: %s",
+                    getattr(msg, "id", "?"),
+                    exc,
+                )
+                await _notify_progress(
+                    on_progress,
+                    "📤 <b>Jalur upload utama gagal, mencoba jalur cadangan...</b>",
+                )
+
+        await _notify_progress(on_progress, "📤 <b>Mengirim media via MTProto...</b>")
         # Kirim ke chat bot (bukan Saved Messages).
-        # Dari sudut pandang Pyrogram (login sebagai user), mengirim ke @bot_username
-        # membuat file muncul langsung di chat antara user dan bot.
-        bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+        # Resolve peer lebih dulu agar send_* tidak berhenti saat upload mulai.
+        bot_peer = await _prepare_bot_peer(client)
 
         ul_cb = _make_pyrogram_progress(on_progress, "Mengirim", file_size) if show_progress else None
         caption = _build_caption(msg.caption or "")
@@ -1746,6 +1858,23 @@ class SafeForward:
                         )
                         return True, None
                     else:
+                        # Untuk link private yang tidak dilindungi, Telegram bisa
+                        # menyalin media di server tanpa download + upload ulang.
+                        # Ini menghilangkan titik macet transfer 41 MB di Railway.
+                        if isinstance(chat, int):
+                            try:
+                                await _pyrogram_copy_with_notice(
+                                    client, bot, msg, user_chat_id, file_size
+                                )
+                                return True, None
+                            except (BadRequest, Forbidden, asyncio.TimeoutError) as exc:
+                                logger.info(
+                                    "Server-side copy gagal untuk msg %s, "
+                                    "lanjut ke jalur upload: %s",
+                                    msg_id,
+                                    exc,
+                                )
+
                         # Fast path: PTB bot.copy_message
                         # Tidak ada batasan ukuran (file tidak di-download),
                         # tidak masuk Saved Messages karena dikirim dari bot.
