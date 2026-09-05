@@ -20,6 +20,7 @@ from pyrogram.errors import (
     MsgIdInvalid,
     ChatForwardsRestricted,
     FileReferenceExpired,
+    RPCError,
 )
 from pyrogram import raw
 from pyrogram.types import Message
@@ -1270,7 +1271,10 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                 client, msg, path, file_size, on_progress=on_progress,
             )
             return
-        except (BadRequest, Forbidden) as exc:
+        except FloodWait:
+            # Biarkan handler SafeForward utama mengatur jeda rate-limit.
+            raise
+        except (BadRequest, Forbidden, RPCError) as exc:
             # Request MTProto ditolak secara eksplisit, jadi aman mencoba
             # Bot API. Timeout tidak masuk fallback karena bisa saja pesan
             # sebenarnya sudah diterima Telegram dan retry akan menggandakan.
