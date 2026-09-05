@@ -37,6 +37,12 @@ FLOOD_LIMIT = 60
 
 # Batas upload ulang via Bot API (file di atas ini tidak bisa di-re-upload oleh bot)
 _BOT_API_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
+# Batas waktu transfer individual. Nilai dinamis di bawah menjaga file kecil
+# tidak menggantung terlalu lama, sementara file besar tetap punya waktu cukup.
+_DOWNLOAD_TIMEOUT_MIN = 120
+_DOWNLOAD_TIMEOUT_MAX = 600
+_ALBUM_DOWNLOAD_TIMEOUT = 300
+_PROGRESS_CALLBACK_TIMEOUT = 5
 
 # Username bot — diset sekali saat startup via set_bot_username()
 _BOT_USERNAME: str = ""
@@ -155,7 +161,12 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
             f"{info_line}"
         )
         try:
-            await on_progress(text)
+            # Update progress hanya informasi tambahan. Jangan biarkan request
+            # edit pesan yang lambat menahan transfer Pyrogram.
+            await asyncio.wait_for(
+                on_progress(text),
+                timeout=_PROGRESS_CALLBACK_TIMEOUT,
+            )
         except Exception:
             pass
 
@@ -237,6 +248,52 @@ def _fmt_size(size_bytes: int) -> str:
     return f"{size_bytes / 1024 / 1024 / 1024:.2f} GB"
 
 
+def _download_timeout(file_size: int | None) -> int:
+    """Timeout download yang proporsional terhadap ukuran media."""
+    if not file_size:
+        return _ALBUM_DOWNLOAD_TIMEOUT
+    size_mb = file_size / (1024 * 1024)
+    return max(
+        _DOWNLOAD_TIMEOUT_MIN,
+        min(_DOWNLOAD_TIMEOUT_MAX, int(size_mb * 1.5) + 30),
+    )
+
+
+async def _notify_progress(on_progress, text: str) -> None:
+    """Kirim status tambahan tanpa pernah menahan transfer terlalu lama."""
+    if not on_progress:
+        return
+    try:
+        await asyncio.wait_for(
+            on_progress(text),
+            timeout=_PROGRESS_CALLBACK_TIMEOUT,
+        )
+    except Exception:
+        pass
+
+
+async def _download_media(client, media, file_size: int | None = None,
+                          progress=None):
+    """Download media dengan batas waktu agar job tidak menggantung selamanya."""
+    timeout = _download_timeout(file_size)
+    try:
+        return await asyncio.wait_for(
+            client.download_media(media, progress=progress),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError as exc:
+        size_text = _fmt_size(file_size) if file_size else "media"
+        logger.warning(
+            "Download Pyrogram timeout setelah %ss (%s)",
+            timeout,
+            size_text,
+        )
+        raise RuntimeError(
+            f"Download Telegram timeout setelah {timeout} detik. "
+            "Koneksi Telegram sedang lambat; silakan coba lagi."
+        ) from exc
+
+
 async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                                      on_progress=None):
     """
@@ -251,10 +308,16 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
         if on_progress and file_size >= _PROGRESS_MIN_BYTES
         else None
     )
-    path = await client.download_media(msg, progress=dl_cb)
+    path = await _download_media(
+        client,
+        msg,
+        file_size=file_size,
+        progress=dl_cb,
+    )
     if not path:
         raise RuntimeError("Download gagal, file tidak tersedia.")
 
+    await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
     caption = _build_caption(msg.caption or "")
     try:
         if msg.photo:
@@ -310,7 +373,11 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                     )
                 except Exception:
                     pass
-            path = await client.download_media(m)
+            path = await _download_media(
+                client,
+                m,
+                file_size=_get_file_size(m),
+            )
             if not path:
                 continue
             paths.append(path)
@@ -366,10 +433,16 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
     show_progress = on_progress and file_size >= _PROGRESS_MIN_BYTES
     dl_cb = _make_pyrogram_progress(on_progress, "Mengunduh", file_size) if show_progress else None
 
-    path = await client.download_media(msg, progress=dl_cb)
+    path = await _download_media(
+        client,
+        msg,
+        file_size=file_size,
+        progress=dl_cb,
+    )
     if not path:
         raise RuntimeError("Download gagal, file tidak tersedia.")
 
+    await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
     # Kirim ke chat bot (bukan Saved Messages).
     # Dari sudut pandang Pyrogram (login sebagai user), mengirim ke @bot_username
     # membuat file muncul langsung di chat antara user dan bot.
@@ -433,7 +506,11 @@ async def _send_album_individually(
             except Exception:
                 pass
         try:
-            path = await client.download_media(m)
+            path = await _download_media(
+                client,
+                m,
+                file_size=_get_file_size(m),
+            )
             if path:
                 paths.append((m, path))
         except Exception as e:
