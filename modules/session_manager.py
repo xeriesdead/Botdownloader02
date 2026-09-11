@@ -138,7 +138,9 @@ class SessionManager:
             if user_id in self._sessions:
                 client = self._sessions.pop(user_id)
                 try:
-                    await client.disconnect()
+                    await self._hard_timeout(
+                        client.disconnect(), 10, f"disconnect({user_id})"
+                    )
                 except Exception:
                     pass
 
