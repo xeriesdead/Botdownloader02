@@ -53,9 +53,10 @@ class QueueManager:
 
                 self._active_count += 1
                 try:
-                    await asyncio.wait_for(job(), timeout=JOB_TIMEOUT)
+                    job_timeout = getattr(job, "timeout", JOB_TIMEOUT)
+                    await asyncio.wait_for(job(), timeout=job_timeout)
                 except asyncio.TimeoutError:
-                    logger.warning("Job timeout setelah %ds", JOB_TIMEOUT)
+                    logger.warning("Job timeout setelah %ds", job_timeout)
                 except Exception as e:
                     logger.error("Job error: %s", e, exc_info=True)
                 finally:
@@ -78,11 +79,12 @@ class QueueManager:
             return not self.premium_queue.full()
         return not self.regular_queue.full()
 
-    def add_job(self, job, is_premium: bool = False, user_id: int = 0) -> int:
+    def add_job(self, job, is_premium: bool = False, user_id: int = 0, timeout: int | None = None) -> int:
         """
         Tambah job ke antrian.
         Mengembalikan posisi 1-based dalam antrian (1 = giliran berikutnya).
         Mengembalikan 0 jika antrian penuh (gagal ditambahkan).
+        timeout memberi batas waktu khusus untuk job yang membutuhkan proses panjang.
         """
         track = self._premium_tracking if is_premium else self._regular_tracking
         queue = self.premium_queue   if is_premium else self.regular_queue
@@ -92,6 +94,9 @@ class QueueManager:
             if user_id and user_id in track:
                 track.remove(user_id)
             await job()
+
+        job_timeout = timeout if timeout is not None else JOB_TIMEOUT
+        _tracked.timeout = job_timeout
 
         try:
             # Enqueue dulu — kalau gagal (QueueFull), tracking tidak tersentuh
