@@ -69,6 +69,27 @@ _SINGLE_JOB_TIMEOUT = max(
 )
 
 
+def _queue_notice(pos: int, quota_display: str, detail: str | None = None) -> str:
+    """Jelaskan perbedaan proses aktif dan posisi job yang masih menunggu."""
+    active = queue_manager.active
+    lines = ["📋 <b>Masuk antrian!</b>"]
+    if active:
+        plural = "proses download sedang aktif" if active == 1 else "proses download sedang aktif"
+        lines.append(f"⏳ <b>{active}</b> {plural}.")
+        if pos == 1:
+            lines.append("🎯 Kamu akan diproses setelahnya (antrean berikutnya).")
+        else:
+            lines.append(f"🎯 Posisi antrean kamu: <b>ke-{pos}</b> setelah proses aktif selesai.")
+    elif pos == 1:
+        lines.append("🎯 Belum ada proses aktif. Kamu akan diproses berikutnya.")
+    else:
+        lines.append(f"🎯 Posisi antrean kamu: <b>ke-{pos}</b>.")
+    if detail:
+        lines.append(detail)
+    lines.append(f"📦 Sisa quota: <b>{quota_display}</b>")
+    return "\n".join(lines)
+
+
 def _get_lock(uid: int) -> asyncio.Lock:
     if uid not in _user_locks:
         _user_locks[uid] = asyncio.Lock()
@@ -362,17 +383,7 @@ def setup(app):
 
         quota = QuotaService.get_quota(uid)
         quota_display = "∞ Unlimited" if quota.get("unlimited") else str(quota["total"])
-        if pos > 1:
-            await edit(
-                f"📋 <b>Masuk antrian!</b>\n"
-                f"Posisi kamu: <b>ke-{pos}</b>\n"
-                f"📦 Sisa quota: <b>{quota_display}</b>"
-            )
-        else:
-            await edit(
-                f"⏳ <b>Download dimulai...</b>\n"
-                f"📦 Sisa quota: <b>{quota_display}</b>"
-            )
+        await edit(_queue_notice(pos, quota_display))
 
     # ── /get — fungsi tunggal untuk single & bulk ─────────────────────────
     async def get_cmd(update, context):
@@ -630,21 +641,10 @@ def setup(app):
                 await _edit_s("❌ Server sedang sibuk, coba lagi nanti.")
                 return
 
-            if pos > 1:
-                await _edit_s(
-                    f"📋 <b>Masuk antrian!</b>\n"
-                    f"Posisi kamu: <b>ke-{pos}</b>\n"
-                    f"⏳ Menunggu download sebelumnya selesai...\n\n"
-                    f"📦 Sisa quota: <b>{quota_disp}</b>",
-                    html=True,
-                )
-            else:
-                await _edit_s(
-                    f"📋 <b>Masuk antrian!</b>\n"
-                    f"Posisi kamu: <b>ke-1</b> (giliran berikutnya)\n"
-                    f"📦 Sisa quota: <b>{quota_disp}</b>",
-                    html=True,
-                )
+            await _edit_s(
+                _queue_notice(pos, quota_disp),
+                html=True,
+            )
             return
 
         # ── Dua link → mode bulk ──────────────────────────────────────────
@@ -959,33 +959,19 @@ def setup(app):
                     pass
                 return
 
-            if pos > 1:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id, message_id=pmsg_id,
-                        text=(
-                            f"📋 <b>Masuk antrian!</b>\n"
-                            f"Posisi kamu: <b>ke-{pos}</b> dalam antrian\n"
-                            f"⏳ {count} pesan akan diunduh setelah giliran tiba.\n\n"
-                            f"📦 Sisa quota: <b>{quota_disp}</b>"
-                        ),
-                        parse_mode=ParseMode.HTML,
-                    )
-                except TgBadRequest:
-                    pass
-            else:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id, message_id=pmsg_id,
-                        text=(
-                            f"⏳ <b>Mengunduh {count} pesan... (0/{count})</b>\n"
-                            f"📦 Sisa quota: {quota_disp}\n\n"
-                            "<i>Ketik /canceldownload untuk membatalkan.</i>"
-                        ),
-                        parse_mode=ParseMode.HTML,
-                    )
-                except TgBadRequest:
-                    pass
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=pmsg_id,
+                    text=_queue_notice(
+                        pos,
+                        quota_disp,
+                        f"📦 Request ini berisi <b>{count}</b> pesan.",
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+            except TgBadRequest:
+                pass
             return
 
         # ── Lebih dari 2 argumen ──────────────────────────────────────────
