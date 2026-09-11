@@ -1487,6 +1487,22 @@ class SafeForward:
                     client, source_chat, msg_id
                 )
 
+                # Bot API tidak dapat mengunggah media di atas 50 MB.
+                # Hindari download berulang melalui send_media_group lalu
+                # fallback; langsung gunakan jalur MTProto per item.
+                if any(
+                    (_get_file_size(message) or 0) > _BOT_API_UPLOAD_LIMIT
+                    for message in album_messages
+                ):
+                    await _notify_progress(
+                        on_progress,
+                        "📤 <b>Mengirim media besar dari album...</b>",
+                    )
+                    return await _send_album_individually(
+                        client, bot, source_chat, msg_id, user_chat_id,
+                        on_progress=on_progress, is_premium=is_premium,
+                    )
+
                 # Album publik tidak perlu di-download ke Railway. Salin
                 # setiap item langsung dari channel melalui Bot API.
                 if not is_restricted:
