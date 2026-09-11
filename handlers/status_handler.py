@@ -2,7 +2,11 @@ from telegram.ext import CommandHandler
 from telegram.constants import ParseMode
 
 from database.db import db
-from modules.quota_service import QuotaService
+from modules.quota_service import (
+    QuotaService,
+    DAILY_CLAIM_AMOUNT,
+    MAX_DAILY_QUOTA,
+)
 from modules.premium_system import premium_info
 from modules.session_manager import session_manager
 from modules.channel_guard import require_member
@@ -72,14 +76,20 @@ def setup(app):
                 f"<i>Quota tidak terbatas, nikmati tanpa limit!</i>"
             )
         else:
+            claim_line = (
+                f"🎁 Daily claim : <b>tersedia (+{DAILY_CLAIM_AMOUNT})</b>"
+                if quota.get("claim_available")
+                else "✅ Daily claim : sudah diambil hari ini"
+            )
             quota_block = (
                 f"<b>Quota</b>\n"
-                f"🎯 Harian  : <code>{quota['quota']}</code>\n"
+                f"🎯 Harian  : <code>{quota['quota']}/{MAX_DAILY_QUOTA}</code>\n"
                 f"🎁 Bonus   : <code>{quota['bonus']}</code>\n"
                 f"📦 Total   : <code>{total}</code>\n"
+                f"{claim_line}\n"
                 f"<code>[{bar}]</code>\n\n"
-                f"<i>Quota reset otomatis setiap hari pukul 00:00.\n"
-                f"Maksimal {5} quota/hari (bonus referral tidak terbatas).</i>"
+                f"<i>Gunakan /claim setiap hari untuk +{DAILY_CLAIM_AMOUNT} quota.\n"
+                f"Claim yang terlewat tidak menumpuk. Bonus referral tidak terbatas.</i>"
             )
 
         await update.message.reply_text(
@@ -115,10 +125,14 @@ def setup(app):
             bar_fill = min(total, 10)
             bar      = "█" * bar_fill + "░" * (10 - bar_fill)
             detail   = (
-                f"📅 Harian  : <code>{quota['quota']}</code>\n"
+                f"📅 Harian  : <code>{quota['quota']}/{MAX_DAILY_QUOTA}</code>\n"
                 f"🎁 Bonus   : <code>{quota['bonus']}</code>\n"
-                f"<i>Quota harian reset otomatis setiap hari. "
-                f"Gunakan /referral untuk tambah bonus quota.</i>"
+                + (
+                    f"🎁 Daily claim tersedia: +{DAILY_CLAIM_AMOUNT}\n"
+                    if quota.get("claim_available")
+                    else "✅ Daily claim sudah diambil hari ini\n"
+                )
+                + "<i>Gunakan /claim setiap hari. Claim yang terlewat tidak menumpuk.</i>"
             )
 
         await update.message.reply_text(
@@ -130,5 +144,41 @@ def setup(app):
             parse_mode=ParseMode.HTML,
         )
 
+    async def claim(update, context):
+        if not await require_member(context.bot, update):
+            return
+
+        uid = update.effective_user.id
+        if not db.get_user(uid):
+            return await update.message.reply_text(
+                "❌ Kamu belum terdaftar. Kirim /start dulu."
+            )
+
+        result = QuotaService.claim_daily(uid)
+        reason = result.get("reason")
+        if result.get("claimed"):
+            await update.message.reply_text(
+                "🎁 <b>Daily claim berhasil!</b>\n\n"
+                f"📦 Quota harian: <b>{result['quota']}/{MAX_DAILY_QUOTA}</b>\n"
+                f"📦 Total tersedia: <b>{result['total']}</b>\n\n"
+                "Kamu bisa claim lagi besok.",
+                parse_mode=ParseMode.HTML,
+            )
+        elif reason == "already_claimed":
+            await update.message.reply_text(
+                "⏳ <b>Daily claim sudah diambil hari ini.</b>\n\n"
+                "Claim berikutnya tersedia besok.",
+                parse_mode=ParseMode.HTML,
+            )
+        elif reason == "premium":
+            await update.message.reply_text(
+                "💎 Akun Premium tidak memerlukan daily claim karena quota Unlimited."
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Daily claim belum bisa diproses. Coba lagi nanti."
+            )
+
     app.add_handler(CommandHandler("status",  status))
     app.add_handler(CommandHandler("myquota", myquota))
+    app.add_handler(CommandHandler("claim", claim))

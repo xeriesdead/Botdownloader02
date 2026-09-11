@@ -1,23 +1,18 @@
 from database.db import db
 from config import QUOTA_WARN_THRESHOLD
+from datetime import date
 
-DEFAULT_DAILY_QUOTA = 5
+DAILY_CLAIM_AMOUNT = 3
+MAX_DAILY_QUOTA = 15
+DEFAULT_DAILY_QUOTA = 0
 
 
 class QuotaService:
 
     @staticmethod
     def reset_if_needed(user_id: int):
-        """Reset quota harian jika sudah berganti hari. Premium tidak perlu reset."""
-        if db.is_premium(user_id):
-            return
-        user = db.get_user(user_id)
-        if not user:
-            return
-        from datetime import date
-        today = str(date.today())
-        if user.get("last_reset") != today:
-            db.reset_daily_quota(user_id, DEFAULT_DAILY_QUOTA)
+        """Kompatibilitas lama; quota kini hanya bertambah lewat /claim."""
+        return
 
     @staticmethod
     def use_quota(user_id: int) -> bool:
@@ -28,8 +23,6 @@ class QuotaService:
         """
         if db.is_premium(user_id):
             return True
-
-        QuotaService.reset_if_needed(user_id)
 
         rows = db.execute(
             "UPDATE users SET bonus_quota = bonus_quota - 1 "
@@ -55,13 +48,49 @@ class QuotaService:
         """
         if db.is_premium(user_id):
             return {"quota": -1, "bonus": 0, "total": -1, "unlimited": True}
-        QuotaService.reset_if_needed(user_id)
         user = db.get_user(user_id)
         if not user:
             return {"quota": 0, "bonus": 0, "total": 0, "unlimited": False}
         q = user.get("quota") or 0
         b = user.get("bonus_quota") or 0
-        return {"quota": q, "bonus": b, "total": q + b, "unlimited": False}
+        today = date.today().isoformat()
+        return {
+            "quota": q,
+            "bonus": b,
+            "total": q + b,
+            "unlimited": False,
+            "claim_available": user.get("daily_claim_date") != today,
+        }
+
+    @staticmethod
+    def claim_daily(user_id: int) -> dict:
+        """Ambil bonus harian +3 sekali per tanggal, tanpa catch-up hari terlewat."""
+        if db.is_premium(user_id):
+            return {"claimed": False, "reason": "premium"}
+
+        today = date.today().isoformat()
+        row = db.claim_daily_quota(
+            user_id,
+            DAILY_CLAIM_AMOUNT,
+            MAX_DAILY_QUOTA,
+            today,
+        )
+        if row:
+            quota = row.get("quota") or 0
+            bonus = row.get("bonus_quota") or 0
+            return {
+                "claimed": True,
+                "quota": quota,
+                "bonus": bonus,
+                "total": quota + bonus,
+            }
+
+        user = db.get_user(user_id)
+        if not user:
+            return {"claimed": False, "reason": "not_registered"}
+        if user.get("daily_claim_date") == today:
+            return {"claimed": False, "reason": "already_claimed"}
+        return {"claimed": False, "reason": "unavailable"}
 
     @staticmethod
     def add_bonus(user_id: int, amount: int):
@@ -76,13 +105,13 @@ class QuotaService:
         """
         Kembalikan/tambah quota harian.
         - Premium: tidak perlu (unlimited).
-        - Free: di-cap di DEFAULT_DAILY_QUOTA agar tidak bisa stack.
+        - Free: di-cap di MAX_DAILY_QUOTA agar refund tidak menumpuk tanpa batas.
         """
         if db.is_premium(user_id):
             return
         db.execute(
             "UPDATE users SET quota = MIN(quota + ?, ?) WHERE user_id = ?",
-            (amount, DEFAULT_DAILY_QUOTA, user_id),
+            (amount, MAX_DAILY_QUOTA, user_id),
         )
 
     @staticmethod

@@ -2,7 +2,7 @@ from telegram.ext import CommandHandler
 from telegram.constants import ParseMode
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from modules.quota_service import DEFAULT_DAILY_QUOTA
+from modules.quota_service import DAILY_CLAIM_AMOUNT, MAX_DAILY_QUOTA
 from modules.channel_guard import require_member
 from config import MAX_FILE_SIZE_MB, MAX_FILE_SIZE_MB_PREMIUM
 from database.db import db
@@ -21,7 +21,7 @@ def setup(app):
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
             "🆓 <b>FREE</b>\n"
-            f"  ├ Quota harian  : <code>{DEFAULT_DAILY_QUOTA} per hari</code>\n"
+            f"  ├ Quota harian  : <code>claim +{DAILY_CLAIM_AMOUNT} (maks {MAX_DAILY_QUOTA})</code>\n"
             f"  ├ Batas ukuran  : <code>{MAX_FILE_SIZE_MB} MB per file</code>\n"
             "  └ Antrian       : Normal\n\n"
 

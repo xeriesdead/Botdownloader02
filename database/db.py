@@ -50,13 +50,14 @@ class Database:
                     username       TEXT    DEFAULT '',
                     session_string TEXT,
                     phone          TEXT,
-                    quota          INTEGER DEFAULT 5,
+                    quota          INTEGER DEFAULT 0,
                     bonus_quota    INTEGER DEFAULT 0,
                     premium        INTEGER DEFAULT 0,
                     premium_until  TEXT,
                     target         TEXT,
                     referrer_id    BIGINT,
                     last_reset     TEXT    DEFAULT CURRENT_DATE::TEXT,
+                    daily_claim_date TEXT,
                     banned         INTEGER DEFAULT 0,
                     login_at       TEXT,
                     created_at     TIMESTAMP DEFAULT NOW()
@@ -76,6 +77,8 @@ class Database:
                     value TEXT
                 );
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_claim_date TEXT;
+                ALTER TABLE users ALTER COLUMN quota SET DEFAULT 0;
             """)
 
     # ------------------------------------------------------------------ #
@@ -244,6 +247,30 @@ class Database:
         self.execute(
             "UPDATE users SET quota = ?, last_reset = CURRENT_DATE::TEXT WHERE user_id = ?",
             (amount, user_id),
+        )
+
+    def claim_daily_quota(
+        self,
+        user_id: int,
+        amount: int,
+        max_quota: int,
+        claim_date: str,
+    ):
+        """Claim quota sekali per tanggal dengan batas quota harian."""
+        return self.fetchone(
+            """
+            UPDATE users
+            SET quota = LEAST(quota + ?, ?),
+                daily_claim_date = ?
+            WHERE user_id = ?
+              AND premium = 0
+              AND (
+                  daily_claim_date IS NULL
+                  OR daily_claim_date <> ?
+              )
+            RETURNING quota, bonus_quota, daily_claim_date
+            """,
+            (amount, max_quota, claim_date, user_id, claim_date),
         )
 
 

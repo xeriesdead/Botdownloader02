@@ -6,7 +6,7 @@ butuh proses selalu hidup.
 Perbedaan dari main.py:
 - Telegram update diterima lewat HTTP POST /webhook/<WEBHOOK_SECRET>,
   bukan lewat long-polling ke API Telegram.
-- 3 loop latar belakang (cleanup, daily reset, premium expiry) diganti jadi
+- 3 loop latar belakang (cleanup, daily claim reminder, premium expiry) diganti jadi
   endpoint HTTP /tasks/*, dipicu scheduler eksternal (mis. Google Cloud
   Scheduler) alih-alih loop yang menunggu di memori selamanya.
 
@@ -23,7 +23,7 @@ from config import BOT_TOKEN
 from modules.queue_manager import queue_manager
 from modules.safe_forward import set_bot_username
 from modules.cleanup import run_cleanup_once
-from modules.daily_reset_notifier import run_daily_reset_once
+from modules.daily_reset_notifier import run_daily_claim_once
 from modules.premium_expiry import run_premium_expiry_once
 from logger import logger
 
@@ -104,12 +104,12 @@ async def handle_task_cleanup(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
-async def handle_task_daily_reset(request: web.Request) -> web.Response:
+async def handle_task_daily_claim(request: web.Request) -> web.Response:
     if not _tasks_secret_ok(request):
         return web.Response(status=403)
     application: Application = request.app["telegram_app"]
-    total, notified = await run_daily_reset_once(application.bot)
-    return web.json_response({"reset": total, "notified": notified})
+    total, notified = await run_daily_claim_once(application.bot)
+    return web.json_response({"users": total, "notified": notified})
 
 
 async def handle_task_premium_expiry(request: web.Request) -> web.Response:
@@ -145,7 +145,9 @@ def create_app() -> web.Application:
     app.router.add_post(f"/webhook/{{secret}}", handle_webhook)
     app.router.add_get("/healthz", handle_health)
     app.router.add_post("/tasks/cleanup", handle_task_cleanup)
-    app.router.add_post("/tasks/daily-reset", handle_task_daily_reset)
+    app.router.add_post("/tasks/daily-claim", handle_task_daily_claim)
+    # Alias lama agar scheduler yang sudah dikonfigurasi tidak langsung rusak.
+    app.router.add_post("/tasks/daily-reset", handle_task_daily_claim)
     app.router.add_post("/tasks/premium-expiry", handle_task_premium_expiry)
 
     app.on_startup.append(on_startup)

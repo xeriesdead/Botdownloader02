@@ -5,7 +5,7 @@ from config import BOT_TOKEN
 from modules.queue_manager import queue_manager
 from modules.cleanup import run_cleanup_loop
 from modules.safe_forward import set_bot_username
-from modules.daily_reset_notifier import run_daily_reset_loop
+from modules.daily_reset_notifier import run_daily_claim_loop
 from modules.premium_expiry import run_premium_expiry_loop
 from logger import logger
 
@@ -24,10 +24,10 @@ import handlers.ai_handler
 async def post_init(application: Application) -> None:
     await queue_manager.start()
     asyncio.create_task(run_cleanup_loop())
-    asyncio.create_task(run_daily_reset_loop(application.bot))
+    asyncio.create_task(run_daily_claim_loop(application.bot))
     asyncio.create_task(run_premium_expiry_loop(application.bot))
     me = await application.bot.get_me()
-    set_bot_username(me.username, me.id)
+    set_bot_username(me.username)
     logger.info(f"Bot started: @{me.username} (id={me.id})")
     print(f"✅ Bot running: @{me.username}")
 

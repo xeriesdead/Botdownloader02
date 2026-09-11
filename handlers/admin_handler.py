@@ -194,7 +194,7 @@ def setup(app):
         referral_ct  = len(db.fetchall("SELECT user_id FROM users WHERE referrer_id IS NOT NULL"))
         bonus_ct     = len(db.fetchall("SELECT user_id FROM users WHERE bonus_quota > 0"))
         active_today = len(db.fetchall(
-            "SELECT user_id FROM users WHERE last_reset = ?", (today,)
+            "SELECT user_id FROM users WHERE daily_claim_date = ?", (today,)
         ))
 
         await update.message.reply_text(
@@ -211,7 +211,7 @@ def setup(app):
             f"{'─' * 28}\n"
             f"🔗 Dari referral        : <b>{referral_ct}</b>\n"
             f"🎁 Punya bonus quota    : <b>{bonus_ct}</b>\n"
-            f"📅 Aktif hari ini       : <b>{active_today}</b>",
+            f"📅 Claim harian hari ini : <b>{active_today}</b>",
             parse_mode=ParseMode.HTML,
         )
 

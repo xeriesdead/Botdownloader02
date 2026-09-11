@@ -15,6 +15,7 @@ BOT_COMMANDS = [
     BotCommand("get",             "Download media (single / bulk / album)"),
     BotCommand("info",            "Lihat info media sebelum download"),
     BotCommand("status",          "Lihat quota dan status akun"),
+    BotCommand("claim",           "Claim quota harian +3"),
     BotCommand("referral",        "Dapatkan link referral & bonus quota"),
     BotCommand("pay",             "Info upgrade ke Premium"),
     BotCommand("help",            "Panduan penggunaan bot"),
@@ -29,6 +30,7 @@ WELCOME_TEXT = (
     "4. <code>/get &lt;link_awal&gt; &lt;link_akhir&gt;</code> — download banyak media\n"
     "5. Link YouTube, TikTok, Instagram, Facebook, X, dan Threads publik\n"
     "   juga bisa langsung dipakai dengan <code>/get</code>.\n\n"
+    "Gunakan /claim setiap hari untuk mendapatkan +3 quota (maksimal 15).\n\n"
     "Mendukung channel &amp; grup <b>public</b> maupun <b>private</b>.\n\n"
     "Ketik /help untuk panduan lengkap."
 )
@@ -93,6 +95,7 @@ def setup(app):
                 "4. <code>/get &lt;link_awal&gt; &lt;link_akhir&gt;</code> — download banyak media\n"
                 "5. Link YouTube, TikTok, Instagram, Facebook, X, dan Threads publik\n"
                 "   juga bisa langsung dipakai dengan <code>/get</code>.\n\n"
+                "Gunakan /claim setiap hari untuk mendapatkan +3 quota (maksimal 15).\n\n"
                 "Mendukung channel &amp; grup <b>public</b> maupun <b>private</b>.\n\n"
                 "Ketik /help untuk panduan lengkap.",
                 parse_mode=ParseMode.HTML,

@@ -34,6 +34,7 @@ def setup(app):
             "• /canceldownload — batalkan download yang sedang berjalan\n\n"
             "<b>Akun &amp; Quota</b>\n"
             "• /status — lihat quota &amp; status\n"
+            "• /claim — ambil +3 quota harian (maksimal 15)\n"
             "• /referral — dapat +3 bonus quota per referral\n\n"
             "<b>Premium</b>\n"
             "• /pay — info upgrade ke Premium (quota Unlimited)\n\n"
