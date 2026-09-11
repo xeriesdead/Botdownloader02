@@ -63,9 +63,14 @@ _LINK_INVALID_TEXT = (
 _SESSION_LOOKUP_TIMEOUT = 35
 _LOCK_WAIT_TIMEOUT = 30
 _BULK_FETCH_TIMEOUT = 30
+_ALBUM_JOB_TIMEOUT = max(JOB_TIMEOUT * 3, 1800)  # maksimal 30 menit untuk album besar
 _SINGLE_JOB_TIMEOUT = max(
     60,
     JOB_TIMEOUT - _SESSION_LOOKUP_TIMEOUT - _LOCK_WAIT_TIMEOUT - 5,
+)
+_ALBUM_PROCESS_TIMEOUT = max(
+    60,
+    _ALBUM_JOB_TIMEOUT - _SESSION_LOOKUP_TIMEOUT - _LOCK_WAIT_TIMEOUT - 5,
 )
 
 
@@ -584,7 +589,7 @@ def setup(app):
                                     skip_public_copy=public_copy_failed,
                                     single_only=single_only,
                                 ),
-                                timeout=_SINGLE_JOB_TIMEOUT,
+                                timeout=(_SINGLE_JOB_TIMEOUT if single_only else _ALBUM_PROCESS_TIMEOUT),
                                 operation=f"forward message {msg_id}",
                             )
                         except asyncio.TimeoutError:
@@ -634,7 +639,10 @@ def setup(app):
                     if uc is not None:
                         await session_manager.close(uid)
 
-            pos = queue_manager.add_job(single_job, is_prem, uid)
+            pos = queue_manager.add_job(
+                single_job, is_prem, uid,
+                timeout=(JOB_TIMEOUT if single_only else _ALBUM_JOB_TIMEOUT),
+            )
             if pos == 0:
                 # Race condition: antrian penuh setelah can_add lolos
                 QuotaService.add_quota(uid, 1)
