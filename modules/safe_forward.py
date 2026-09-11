@@ -243,6 +243,37 @@ def _new_download_dir(user_chat_id: int) -> str:
     )
 
 
+def _resolve_download_path(path, download_dir: str) -> str | None:
+    """
+    Ambil path file sebenarnya dari hasil Pyrogram.
+
+    Tergantung jenis media dan versi Pyrogram, download_media() dapat
+    mengembalikan direktori tujuan, bukan file di dalamnya.
+    """
+    if path:
+        path = os.fspath(path)
+        if os.path.isfile(path):
+            return path
+
+    roots = []
+    if path and os.path.isdir(path):
+        roots.append(path)
+    if os.path.isdir(download_dir) and download_dir not in roots:
+        roots.append(download_dir)
+
+    candidates = []
+    for root in roots:
+        for current_root, _, filenames in os.walk(root):
+            for filename in filenames:
+                candidate = os.path.join(current_root, filename)
+                if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                    candidates.append(candidate)
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: os.path.getmtime(item))
+
+
 async def _notify_progress(on_progress, text: str):
     """Kirim status fase tanpa membuat download gagal jika Telegram sedang timeout."""
     if not on_progress:
@@ -511,7 +542,7 @@ def _album_download_target(msg, user_chat_id: int, album_msg_id: int,
     """Buat nama file unik agar item album tidak saling menimpa."""
     if msg.photo:
         extension = ".jpg"
-    elif msg.video or msg.animation or msg.video_note:
+    elif _is_video_media(msg) or msg.animation or msg.video_note:
         extension = ".mp4"
     elif msg.audio:
         extension = ".mp3"
@@ -701,6 +732,7 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
         except asyncio.TimeoutError:
             raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
 
+        path = _resolve_download_path(path, work_dir)
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
@@ -867,7 +899,8 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                         timeout=dl_timeout,
                         operation=f"download album item {i + 1}/{total}",
                     )
-                    if path and os.path.isfile(path) and os.path.getsize(path) > 0:
+                    path = _resolve_download_path(path, item_dir)
+                    if path and os.path.getsize(path) > 0:
                         break
                     path = None
                 except (asyncio.TimeoutError, Exception) as _dl_err:
@@ -890,7 +923,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
 
             if m.photo:
                 media_items.append(InputMediaPhoto(media=f, caption=caption))
-            elif m.video:
+            elif _is_video_media(m):
                 # Thumbnail bersifat opsional dan tidak boleh menghambat
                 # pengiriman album setelah file berhasil di-download.
                 media_items.append(
@@ -994,6 +1027,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
         except asyncio.TimeoutError:
             raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
 
+        path = _resolve_download_path(path, work_dir)
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
@@ -1273,7 +1307,8 @@ async def _send_album_individually(
                     timeout=dl_timeout,
                     operation=f"download album fallback item {i + 1}/{total}",
                 )
-                if path and os.path.isfile(path) and os.path.getsize(path) > 0:
+                path = _resolve_download_path(path, item_dir)
+                if path and os.path.getsize(path) > 0:
                     break
                 path = None
             except (asyncio.TimeoutError, Exception) as _dl_err:
