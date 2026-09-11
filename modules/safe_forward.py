@@ -43,13 +43,24 @@ FLOOD_LIMIT = 60
 # Batas upload ulang via Bot API (file di atas ini tidak bisa di-re-upload oleh bot)
 _BOT_API_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
 
-# Username bot — diset sekali saat startup via set_bot_username()
+# Identitas bot — diset sekali saat startup via set_bot_username()
 _BOT_USERNAME: str = ""
+_BOT_ID: int | None = None
 
 
-def set_bot_username(username: str):
-    global _BOT_USERNAME
+def set_bot_username(username: str, user_id: int | None = None):
+    global _BOT_USERNAME, _BOT_ID
     _BOT_USERNAME = username
+    _BOT_ID = user_id
+
+
+def _bot_peer():
+    """Kembalikan peer bot tanpa fallback ke Saved Messages pengguna."""
+    if _BOT_ID:
+        return _BOT_ID
+    if _BOT_USERNAME:
+        return f"@{_BOT_USERNAME}"
+    raise RuntimeError("Identitas bot belum tersedia untuk upload MTProto.")
 
 
 def _build_caption(original: str) -> str:
@@ -654,6 +665,15 @@ def _video_metadata(msg) -> dict:
     return metadata
 
 
+def _is_video_media(msg) -> bool:
+    """Deteksi video native maupun video yang dikirim sebagai Telegram document."""
+    if getattr(msg, "video", None):
+        return True
+    document = getattr(msg, "document", None)
+    mime_type = getattr(document, "mime_type", "") or ""
+    return mime_type.lower().startswith("video/")
+
+
 async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                                      on_progress=None):
     """
@@ -700,7 +720,7 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                     bot.send_photo(user_chat_id, photo=f, caption=caption, **_kw),
                     timeout=_UPLOAD_TIMEOUT,
                 )
-        elif msg.video:
+        elif _is_video_media(msg):
             with open(path, "rb") as f:
                 if thumbnail_path:
                     with open(thumbnail_path, "rb") as thumb:
@@ -941,7 +961,7 @@ async def _pyrogram_copy_with_notice(client, bot, msg, user_chat_id: int, file_s
     Fallback untuk file besar (>50 MB) di channel private yang TIDAK restricted:
     Pyrogram meng-copy langsung ke chat bot user via MTProto (bypass batas 50 MB Bot API).
     """
-    bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+    bot_peer = _bot_peer()
     await _hard_timeout(
         msg.copy(bot_peer),
         timeout=_UPLOAD_TIMEOUT,
@@ -980,7 +1000,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
         # Kirim ke chat bot (bukan Saved Messages).
         # Dari sudut pandang Pyrogram (login sebagai user), mengirim ke @bot_username
         # membuat file muncul langsung di chat antara user dan bot.
-        bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+        bot_peer = _bot_peer()
 
         ul_cb = _make_pyrogram_progress(on_progress, "Mengirim", file_size) if show_progress else None
         caption = _build_caption(msg.caption or "")
@@ -995,7 +1015,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_photo",
             )
-        elif msg.video:
+        elif _is_video_media(msg):
             await _hard_timeout(
                 client.send_video(
                     bot_peer,
@@ -1060,7 +1080,7 @@ async def _send_album_item(
     """Kirim satu item album melalui jalur yang sesuai dengan ukuran file."""
     caption = _build_caption(msg.caption or "")
     file_size = _get_file_size(msg) or 0
-    bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+    bot_peer = _bot_peer()
     # Thumbnail tidak wajib; jalur fallback harus fokus mengirim media.
     thumbnail_path = None
     metadata = _video_metadata(msg)
@@ -1078,7 +1098,7 @@ async def _send_album_item(
                     timeout=_UPLOAD_TIMEOUT,
                     operation="Pyrogram album send_photo",
                 )
-            elif msg.video:
+            elif _is_video_media(msg):
                 await _hard_timeout(
                     client.send_video(
                         bot_peer,
@@ -1129,7 +1149,7 @@ async def _send_album_item(
                     bot.send_photo(user_chat_id, photo=f, caption=caption, **_kw),
                     timeout=_UPLOAD_TIMEOUT,
                 )
-            elif msg.video:
+            elif _is_video_media(msg):
                 if thumbnail_path:
                     with open(thumbnail_path, "rb") as thumb:
                         await asyncio.wait_for(

@@ -27,7 +27,7 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(run_daily_reset_loop(application.bot))
     asyncio.create_task(run_premium_expiry_loop(application.bot))
     me = await application.bot.get_me()
-    set_bot_username(me.username)
+    set_bot_username(me.username, me.id)
     logger.info(f"Bot started: @{me.username} (id={me.id})")
     print(f"✅ Bot running: @{me.username}")
 
