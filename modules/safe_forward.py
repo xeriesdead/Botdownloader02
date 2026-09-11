@@ -1473,7 +1473,8 @@ class SafeForward:
 
         # ── Deteksi noforwards sebelum mencoba forward/copy ───────────────
         await _notify_progress(on_progress, "🔎 <b>Memeriksa akses media...</b>")
-        if await _is_forwards_restricted(client, source_chat):
+        is_restricted = await _is_forwards_restricted(client, source_chat)
+        if is_restricted:
             return await _send_album_individually(
                 client, bot, source_chat, msg_id, user_chat_id,
                 on_progress=on_progress, is_premium=is_premium,
