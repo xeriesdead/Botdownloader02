@@ -26,7 +26,6 @@ from modules.safe_forward import (
     check_channel_access,
     copy_public_message,
     _hard_timeout,
-    _create_video_thumbnail_async,
 )
 from modules.channel_guard import require_member
 from modules.activity_log import log as activity_log
@@ -254,10 +253,6 @@ def setup(app):
                         filename = os.path.basename(path)
                         caption = f"📥 <b>{escape(title)}</b>\n<i>via Social Downloader</i>"
                         try:
-                            thumbnail_path = (
-                                await _create_video_thumbnail_async(path)
-                                if _social_file_kind(path) == "video" else None
-                            )
                             with open(path, "rb") as media:
                                 if _social_file_kind(path) == "photo":
                                     try:
@@ -278,24 +273,13 @@ def setup(app):
                                         )
                                 else:
                                     try:
-                                        if thumbnail_path:
-                                            with open(thumbnail_path, "rb") as thumbnail:
-                                                await bot.send_video(
-                                                    chat_id=chat_id, video=media,
-                                                    caption=caption, parse_mode=ParseMode.HTML,
-                                                    thumbnail=thumbnail,
-                                                    supports_streaming=True,
-                                                    write_timeout=_SEND_WRITE_TIMEOUT,
-                                                    read_timeout=_SEND_READ_TIMEOUT,
-                                                )
-                                        else:
-                                            await bot.send_video(
-                                                chat_id=chat_id, video=media,
-                                                caption=caption, parse_mode=ParseMode.HTML,
-                                                supports_streaming=True,
-                                                write_timeout=_SEND_WRITE_TIMEOUT,
-                                                read_timeout=_SEND_READ_TIMEOUT,
-                                            )
+                                        await bot.send_video(
+                                            chat_id=chat_id, video=media,
+                                            caption=caption, parse_mode=ParseMode.HTML,
+                                            supports_streaming=True,
+                                            write_timeout=_SEND_WRITE_TIMEOUT,
+                                            read_timeout=_SEND_READ_TIMEOUT,
+                                        )
                                     except _TRANSIENT_ERRORS:
                                         # send_video gagal (format/timeout) → coba dokumen
                                         media.seek(0)
@@ -306,18 +290,8 @@ def setup(app):
                                             write_timeout=_SEND_WRITE_TIMEOUT,
                                             read_timeout=_SEND_READ_TIMEOUT,
                                         )
-                            if thumbnail_path:
-                                try:
-                                    os.remove(thumbnail_path)
-                                except OSError:
-                                    pass
                             sent += 1
                         except Exception as exc:
-                            if "thumbnail_path" in locals() and thumbnail_path:
-                                try:
-                                    os.remove(thumbnail_path)
-                                except OSError:
-                                    pass
                             failed += 1
                             logger.warning(
                                 "[social] send failed uid=%s file=%s: %s",
