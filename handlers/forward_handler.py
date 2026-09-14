@@ -26,6 +26,7 @@ from modules.safe_forward import (
     check_channel_access,
     copy_public_message,
     _hard_timeout,
+    _create_video_thumbnail_async,
 )
 from modules.channel_guard import require_member
 from modules.activity_log import log as activity_log
@@ -63,36 +64,10 @@ _LINK_INVALID_TEXT = (
 _SESSION_LOOKUP_TIMEOUT = 35
 _LOCK_WAIT_TIMEOUT = 30
 _BULK_FETCH_TIMEOUT = 30
-_ALBUM_JOB_TIMEOUT = max(JOB_TIMEOUT * 3, 1800)  # maksimal 30 menit untuk album besar
 _SINGLE_JOB_TIMEOUT = max(
     60,
     JOB_TIMEOUT - _SESSION_LOOKUP_TIMEOUT - _LOCK_WAIT_TIMEOUT - 5,
 )
-_ALBUM_PROCESS_TIMEOUT = max(
-    60,
-    _ALBUM_JOB_TIMEOUT - _SESSION_LOOKUP_TIMEOUT - _LOCK_WAIT_TIMEOUT - 5,
-)
-
-
-def _queue_notice(pos: int, quota_display: str, detail: str | None = None) -> str:
-    """Jelaskan perbedaan proses aktif dan posisi job yang masih menunggu."""
-    active = queue_manager.active
-    lines = ["📋 <b>Masuk antrian!</b>"]
-    if active:
-        plural = "proses download sedang aktif" if active == 1 else "proses download sedang aktif"
-        lines.append(f"⏳ <b>{active}</b> {plural}.")
-        if pos == 1:
-            lines.append("🎯 Kamu akan diproses setelahnya (antrean berikutnya).")
-        else:
-            lines.append(f"🎯 Posisi antrean kamu: <b>ke-{pos}</b> setelah proses aktif selesai.")
-    elif pos == 1:
-        lines.append("🎯 Belum ada proses aktif. Kamu akan diproses berikutnya.")
-    else:
-        lines.append(f"🎯 Posisi antrean kamu: <b>ke-{pos}</b>.")
-    if detail:
-        lines.append(detail)
-    lines.append(f"📦 Sisa quota: <b>{quota_display}</b>")
-    return "\n".join(lines)
 
 
 def _get_lock(uid: int) -> asyncio.Lock:
@@ -279,6 +254,10 @@ def setup(app):
                         filename = os.path.basename(path)
                         caption = f"📥 <b>{escape(title)}</b>\n<i>via Social Downloader</i>"
                         try:
+                            thumbnail_path = (
+                                await _create_video_thumbnail_async(path)
+                                if _social_file_kind(path) == "video" else None
+                            )
                             with open(path, "rb") as media:
                                 if _social_file_kind(path) == "photo":
                                     try:
@@ -299,13 +278,24 @@ def setup(app):
                                         )
                                 else:
                                     try:
-                                        await bot.send_video(
-                                            chat_id=chat_id, video=media,
-                                            caption=caption, parse_mode=ParseMode.HTML,
-                                            supports_streaming=True,
-                                            write_timeout=_SEND_WRITE_TIMEOUT,
-                                            read_timeout=_SEND_READ_TIMEOUT,
-                                        )
+                                        if thumbnail_path:
+                                            with open(thumbnail_path, "rb") as thumbnail:
+                                                await bot.send_video(
+                                                    chat_id=chat_id, video=media,
+                                                    caption=caption, parse_mode=ParseMode.HTML,
+                                                    thumbnail=thumbnail,
+                                                    supports_streaming=True,
+                                                    write_timeout=_SEND_WRITE_TIMEOUT,
+                                                    read_timeout=_SEND_READ_TIMEOUT,
+                                                )
+                                        else:
+                                            await bot.send_video(
+                                                chat_id=chat_id, video=media,
+                                                caption=caption, parse_mode=ParseMode.HTML,
+                                                supports_streaming=True,
+                                                write_timeout=_SEND_WRITE_TIMEOUT,
+                                                read_timeout=_SEND_READ_TIMEOUT,
+                                            )
                                     except _TRANSIENT_ERRORS:
                                         # send_video gagal (format/timeout) → coba dokumen
                                         media.seek(0)
@@ -316,8 +306,18 @@ def setup(app):
                                             write_timeout=_SEND_WRITE_TIMEOUT,
                                             read_timeout=_SEND_READ_TIMEOUT,
                                         )
+                            if thumbnail_path:
+                                try:
+                                    os.remove(thumbnail_path)
+                                except OSError:
+                                    pass
                             sent += 1
                         except Exception as exc:
+                            if "thumbnail_path" in locals() and thumbnail_path:
+                                try:
+                                    os.remove(thumbnail_path)
+                                except OSError:
+                                    pass
                             failed += 1
                             logger.warning(
                                 "[social] send failed uid=%s file=%s: %s",
@@ -388,7 +388,17 @@ def setup(app):
 
         quota = QuotaService.get_quota(uid)
         quota_display = "∞ Unlimited" if quota.get("unlimited") else str(quota["total"])
-        await edit(_queue_notice(pos, quota_display))
+        if pos > 1:
+            await edit(
+                f"📋 <b>Masuk antrian!</b>\n"
+                f"Posisi kamu: <b>ke-{pos}</b>\n"
+                f"📦 Sisa quota: <b>{quota_display}</b>"
+            )
+        else:
+            await edit(
+                f"⏳ <b>Download dimulai...</b>\n"
+                f"📦 Sisa quota: <b>{quota_display}</b>"
+            )
 
     # ── /get — fungsi tunggal untuk single & bulk ─────────────────────────
     async def get_cmd(update, context):
@@ -487,8 +497,6 @@ def setup(app):
                     )
                 except Exception as exc:
                     logger.debug("Gagal update status message %s: %s", pmsg_id, exc)
-
-            last_progress = [time.monotonic()]
 
             async def single_job():
                 uc = None
@@ -589,7 +597,7 @@ def setup(app):
                                     skip_public_copy=public_copy_failed,
                                     single_only=single_only,
                                 ),
-                                timeout=(_SINGLE_JOB_TIMEOUT if single_only else _ALBUM_PROCESS_TIMEOUT),
+                                timeout=_SINGLE_JOB_TIMEOUT,
                                 operation=f"forward message {msg_id}",
                             )
                         except asyncio.TimeoutError:
@@ -639,20 +647,28 @@ def setup(app):
                     if uc is not None:
                         await session_manager.close(uid)
 
-            pos = queue_manager.add_job(
-                single_job, is_prem, uid,
-                timeout=(JOB_TIMEOUT if single_only else _ALBUM_JOB_TIMEOUT),
-            )
+            pos = queue_manager.add_job(single_job, is_prem, uid)
             if pos == 0:
                 # Race condition: antrian penuh setelah can_add lolos
                 QuotaService.add_quota(uid, 1)
                 await _edit_s("❌ Server sedang sibuk, coba lagi nanti.")
                 return
 
-            await _edit_s(
-                _queue_notice(pos, quota_disp),
-                html=True,
-            )
+            if pos > 1:
+                await _edit_s(
+                    f"📋 <b>Masuk antrian!</b>\n"
+                    f"Posisi kamu: <b>ke-{pos}</b>\n"
+                    f"⏳ Menunggu download sebelumnya selesai...\n\n"
+                    f"📦 Sisa quota: <b>{quota_disp}</b>",
+                    html=True,
+                )
+            else:
+                await _edit_s(
+                    f"📋 <b>Masuk antrian!</b>\n"
+                    f"Posisi kamu: <b>ke-1</b> (giliran berikutnya)\n"
+                    f"📦 Sisa quota: <b>{quota_disp}</b>",
+                    html=True,
+                )
             return
 
         # ── Dua link → mode bulk ──────────────────────────────────────────
@@ -967,19 +983,33 @@ def setup(app):
                     pass
                 return
 
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=pmsg_id,
-                    text=_queue_notice(
-                        pos,
-                        quota_disp,
-                        f"📦 Request ini berisi <b>{count}</b> pesan.",
-                    ),
-                    parse_mode=ParseMode.HTML,
-                )
-            except TgBadRequest:
-                pass
+            if pos > 1:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id, message_id=pmsg_id,
+                        text=(
+                            f"📋 <b>Masuk antrian!</b>\n"
+                            f"Posisi kamu: <b>ke-{pos}</b> dalam antrian\n"
+                            f"⏳ {count} pesan akan diunduh setelah giliran tiba.\n\n"
+                            f"📦 Sisa quota: <b>{quota_disp}</b>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                except TgBadRequest:
+                    pass
+            else:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id, message_id=pmsg_id,
+                        text=(
+                            f"⏳ <b>Mengunduh {count} pesan... (0/{count})</b>\n"
+                            f"📦 Sisa quota: {quota_disp}\n\n"
+                            "<i>Ketik /canceldownload untuk membatalkan.</i>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                except TgBadRequest:
+                    pass
             return
 
         # ── Lebih dari 2 argumen ──────────────────────────────────────────
