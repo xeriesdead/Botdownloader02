@@ -76,6 +76,7 @@ _SINGLE_JOB_TIMEOUT = max(
     60,
     JOB_TIMEOUT - _SESSION_LOOKUP_TIMEOUT - _LOCK_WAIT_TIMEOUT - 5,
 )
+_SINGLE_JOB_TIMEOUT_PREMIUM = 2 * 60 * 60
 
 
 def _get_lock(uid: int) -> asyncio.Lock:
@@ -535,6 +536,11 @@ def setup(app):
                 except Exception as exc:
                     logger.debug("Gagal update status message %s: %s", pmsg_id, exc)
 
+            last_progress = [time.monotonic()]
+            single_job_timeout = (
+                _SINGLE_JOB_TIMEOUT_PREMIUM if is_prem else _SINGLE_JOB_TIMEOUT
+            )
+
             async def single_job():
                 uc = None
                 async def _heartbeat():
@@ -634,7 +640,7 @@ def setup(app):
                                     skip_public_copy=public_copy_failed,
                                     single_only=single_only,
                                 ),
-                                timeout=_SINGLE_JOB_TIMEOUT,
+                                timeout=single_job_timeout,
                                 operation=f"forward message {msg_id}",
                             )
                         except asyncio.TimeoutError:
@@ -684,7 +690,9 @@ def setup(app):
                     if uc is not None:
                         await session_manager.close(uid)
 
-            pos = queue_manager.add_job(single_job, is_prem, uid)
+            pos = queue_manager.add_job(
+                single_job, is_prem, uid, timeout=single_job_timeout
+            )
             if pos == 0:
                 # Race condition: antrian penuh setelah can_add lolos
                 QuotaService.add_quota(uid, 1)
