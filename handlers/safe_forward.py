@@ -40,7 +40,7 @@ _BOT_API_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
 # Batas waktu transfer individual. Nilai dinamis di bawah menjaga file kecil
 # tidak menggantung terlalu lama, sementara file besar tetap punya waktu cukup.
 _DOWNLOAD_TIMEOUT_MIN = 120
-_DOWNLOAD_TIMEOUT_MAX = 2 * 60 * 60  # transfer besar dapat membutuhkan waktu lama
+_DOWNLOAD_TIMEOUT_MAX = 600
 _ALBUM_DOWNLOAD_TIMEOUT = 300
 _PROGRESS_CALLBACK_TIMEOUT = 5
 
@@ -259,40 +259,6 @@ def _download_timeout(file_size: int | None) -> int:
     )
 
 
-def _consume_transfer_task(task: asyncio.Task) -> None:
-    """Ambil exception task transfer yang dibatalkan agar tidak jadi warning."""
-    if task.cancelled():
-        return
-    try:
-        task.exception()
-    except BaseException:
-        pass
-
-
-def _cancel_transfer_task(task: asyncio.Task) -> None:
-    """Batalkan transfer tanpa menunggu Pyrogram menutup seluruh koneksi."""
-    if not task.done():
-        task.cancel()
-    task.add_done_callback(_consume_transfer_task)
-
-
-async def _run_transfer_with_timeout(awaitable, timeout: int, operation: str):
-    """Jalankan transfer dengan hard timeout agar job tidak menggantung."""
-    task = asyncio.ensure_future(awaitable)
-    try:
-        done, _ = await asyncio.wait({task}, timeout=timeout)
-        if task not in done:
-            _cancel_transfer_task(task)
-            raise asyncio.TimeoutError(
-                f"{operation} timeout setelah {timeout} detik"
-            )
-        return task.result()
-    except BaseException:
-        if not task.done() or not task.cancelled():
-            _cancel_transfer_task(task)
-        raise
-
-
 async def _notify_progress(on_progress, text: str) -> None:
     """Kirim status tambahan tanpa pernah menahan transfer terlalu lama."""
     if not on_progress:
@@ -311,10 +277,9 @@ async def _download_media(client, media, file_size: int | None = None,
     """Download media dengan batas waktu agar job tidak menggantung selamanya."""
     timeout = _download_timeout(file_size)
     try:
-        return await _run_transfer_with_timeout(
+        return await asyncio.wait_for(
             client.download_media(media, progress=progress),
             timeout=timeout,
-            operation="Download Telegram",
         )
     except asyncio.TimeoutError as exc:
         size_text = _fmt_size(file_size) if file_size else "media"
