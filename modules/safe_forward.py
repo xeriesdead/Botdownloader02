@@ -43,24 +43,13 @@ FLOOD_LIMIT = 60
 # Batas upload ulang via Bot API (file di atas ini tidak bisa di-re-upload oleh bot)
 _BOT_API_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
 
-# Identitas bot — diset sekali saat startup via set_bot_username()
+# Username bot — diset sekali saat startup via set_bot_username()
 _BOT_USERNAME: str = ""
-_BOT_ID: int | None = None
 
 
-def set_bot_username(username: str, user_id: int | None = None):
-    global _BOT_USERNAME, _BOT_ID
+def set_bot_username(username: str):
+    global _BOT_USERNAME
     _BOT_USERNAME = username
-    _BOT_ID = user_id
-
-
-def _bot_peer():
-    """Kembalikan peer bot tanpa fallback ke Saved Messages pengguna."""
-    if _BOT_ID:
-        return _BOT_ID
-    if _BOT_USERNAME:
-        return f"@{_BOT_USERNAME}"
-    raise RuntimeError("Identitas bot belum tersedia untuk upload MTProto.")
 
 
 def _build_caption(original: str) -> str:
@@ -176,7 +165,12 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
             f"{info_line}"
         )
         try:
-            await on_progress(text)
+            # Progress hanya informasi tambahan. Jika Telegram lambat saat
+            # mengedit pesan status, transfer Pyrogram tetap berjalan.
+            await asyncio.wait_for(
+                on_progress(text),
+                timeout=_PROGRESS_CALLBACK_TIMEOUT,
+            )
         except Exception:
             pass
 
@@ -186,10 +180,13 @@ _PEER_RESOLVE_TIMEOUT  = 20   # detik — batas waktu resolve peer & get_chat
 _MSG_FETCH_TIMEOUT     = 25   # detik — batas waktu get_messages
 _ACCESS_CHECK_TIMEOUT  = 12   # detik — batas waktu pre-flight cek akses channel
 _DOWNLOAD_TIMEOUT      = 120  # detik — batas waktu download satu file via Pyrogram (2 menit)
+_DOWNLOAD_STALL_TIMEOUT = 45  # detik tanpa byte baru sebelum transfer dibatalkan
 _UPLOAD_TIMEOUT        = 300  # detik — batas waktu upload satu file ke Bot API (5 menit)
 _ALBUM_FETCH_TIMEOUT   = 30   # detik — batas waktu mengambil metadata album
 _ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file — dipakai di _send_album_via_bot
 _BOT_COPY_TIMEOUT      = 30   # detik — jalur cepat untuk pesan channel publik
+_PROGRESS_CALLBACK_TIMEOUT = 5  # update status tidak boleh menahan transfer
+_TRANSFER_POLL_INTERVAL = 2  # detik — frekuensi pemeriksaan watchdog transfer
 
 # Timeout PTB untuk operasi upload ke Bot API
 _PTB_WRITE_TIMEOUT   = 90    # detik
@@ -243,45 +240,98 @@ def _new_download_dir(user_chat_id: int) -> str:
     )
 
 
-def _resolve_download_path(path, download_dir: str) -> str | None:
-    """
-    Ambil path file sebenarnya dari hasil Pyrogram.
-
-    Tergantung jenis media dan versi Pyrogram, download_media() dapat
-    mengembalikan direktori tujuan, bukan file di dalamnya.
-    """
-    if path:
-        path = os.fspath(path)
-        if os.path.isfile(path):
-            return path
-
-    roots = []
-    if path and os.path.isdir(path):
-        roots.append(path)
-    if os.path.isdir(download_dir) and download_dir not in roots:
-        roots.append(download_dir)
-
-    candidates = []
-    for root in roots:
-        for current_root, _, filenames in os.walk(root):
-            for filename in filenames:
-                candidate = os.path.join(current_root, filename)
-                if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
-                    candidates.append(candidate)
-
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: os.path.getmtime(item))
-
-
 async def _notify_progress(on_progress, text: str):
     """Kirim status fase tanpa membuat download gagal jika Telegram sedang timeout."""
     if not on_progress:
         return
     try:
-        await on_progress(text)
+        await asyncio.wait_for(
+            on_progress(text),
+            timeout=_PROGRESS_CALLBACK_TIMEOUT,
+        )
     except Exception:
         pass
+
+
+async def _run_transfer_with_watchdog(
+    factory,
+    timeout: int,
+    operation: str,
+    progress=None,
+):
+    """
+    Jalankan transfer Pyrogram dengan timeout total dan timeout saat byte tidak
+    bertambah.
+
+    Pyrogram dapat memanggil callback berulang kali dengan posisi byte yang
+    sama ketika sedang retry pada chunk yang gagal. Callback saja tidak cukup
+    sebagai tanda koneksi masih hidup; watchdog hanya di-reset jika posisi
+    transfer benar-benar berubah.
+    """
+    last_progress_at = time.monotonic()
+    last_position = None
+
+    async def _progress(current: int, total: int):
+        nonlocal last_progress_at, last_position
+        if current != last_position:
+            last_position = current
+            last_progress_at = time.monotonic()
+        if progress:
+            try:
+                await progress(current, total)
+            except Exception:
+                pass
+
+    task = asyncio.ensure_future(factory(_progress))
+    started_at = time.monotonic()
+    try:
+        while not task.done():
+            await asyncio.sleep(_TRANSFER_POLL_INTERVAL)
+            now = time.monotonic()
+            if now - last_progress_at >= _DOWNLOAD_STALL_TIMEOUT:
+                logger.warning(
+                    "%s stalled: no byte progress for %ss (position=%s)",
+                    operation,
+                    _DOWNLOAD_STALL_TIMEOUT,
+                    last_position,
+                )
+                task.cancel()
+                task.add_done_callback(_consume_cancelled_task)
+                raise asyncio.TimeoutError(
+                    f"{operation} stalled after {_DOWNLOAD_STALL_TIMEOUT}s"
+                )
+            if now - started_at >= timeout:
+                logger.warning("%s timeout setelah %ss", operation, timeout)
+                task.cancel()
+                task.add_done_callback(_consume_cancelled_task)
+                raise asyncio.TimeoutError(f"{operation} timeout")
+        return task.result()
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            task.add_done_callback(_consume_cancelled_task)
+        raise
+
+
+async def _download_media(
+    client,
+    media,
+    file_name: str,
+    timeout: int,
+    operation: str,
+    progress=None,
+):
+    """Download media via Pyrogram dengan watchdog transfer yang nyata."""
+    return await _run_transfer_with_watchdog(
+        lambda transfer_progress: client.download_media(
+            media,
+            file_name=file_name,
+            progress=transfer_progress,
+        ),
+        timeout=timeout,
+        operation=operation,
+        progress=progress,
+    )
 
 
 async def copy_public_message(
@@ -542,7 +592,7 @@ def _album_download_target(msg, user_chat_id: int, album_msg_id: int,
     """Buat nama file unik agar item album tidak saling menimpa."""
     if msg.photo:
         extension = ".jpg"
-    elif _is_video_media(msg) or msg.animation or msg.video_note:
+    elif msg.video or msg.animation or msg.video_note:
         extension = ".mp4"
     elif msg.audio:
         extension = ".mp3"
@@ -696,15 +746,6 @@ def _video_metadata(msg) -> dict:
     return metadata
 
 
-def _is_video_media(msg) -> bool:
-    """Deteksi video native maupun video yang dikirim sebagai Telegram document."""
-    if getattr(msg, "video", None):
-        return True
-    document = getattr(msg, "document", None)
-    mime_type = getattr(document, "mime_type", "") or ""
-    return mime_type.lower().startswith("video/")
-
-
 async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                                      on_progress=None):
     """
@@ -724,22 +765,28 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
     thumbnail_path = None
     try:
         try:
-            path = await _hard_timeout(
-                client.download_media(msg, file_name=work_dir, progress=dl_cb),
+            path = await _download_media(
+                client,
+                msg,
+                file_name=work_dir,
                 timeout=_DOWNLOAD_TIMEOUT,
                 operation=f"download message {getattr(msg, 'id', '?')}",
+                progress=dl_cb,
             )
         except asyncio.TimeoutError:
             raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
 
-        path = _resolve_download_path(path, work_dir)
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
+        await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
         caption = _build_caption(msg.caption or "")
-        # Thumbnail tidak wajib. FFmpeg dapat menahan worker setelah download
-        # selesai, terutama pada video dengan metadata/container yang rusak.
-        thumbnail_path = None
+        # Buat thumbnail dari frame video setelah download selesai. Jika FFmpeg
+        # gagal, upload tetap dilanjutkan tanpa thumbnail.
+        thumbnail_path = (
+            await _create_video_thumbnail_async(path)
+            if msg.video else None
+        )
         metadata = _video_metadata(msg)
         _kw = dict(
             write_timeout=_PTB_WRITE_TIMEOUT,
@@ -752,7 +799,7 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                     bot.send_photo(user_chat_id, photo=f, caption=caption, **_kw),
                     timeout=_UPLOAD_TIMEOUT,
                 )
-        elif _is_video_media(msg):
+        elif msg.video:
             with open(path, "rb") as f:
                 if thumbnail_path:
                     with open(thumbnail_path, "rb") as thumb:
@@ -816,6 +863,10 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                     bot.send_document(user_chat_id, document=f, caption=caption, **_kw),
                     timeout=_UPLOAD_TIMEOUT,
                 )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            "Upload timeout — koneksi ke Telegram terlalu lambat. Coba lagi."
+        ) from exc
     finally:
         if thumbnail_path:
             try:
@@ -882,25 +933,23 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                     file_size,
                 )
             elif on_progress:
-                try:
-                    await on_progress(
-                        f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})"
-                    )
-                except Exception:
-                    pass
+                await _notify_progress(
+                    on_progress,
+                    f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})",
+                )
             path = None
             item_dir = _new_download_dir(user_chat_id)
             for _dl_attempt in range(2):
                 try:
-                    path = await _hard_timeout(
-                        client.download_media(
-                            m, file_name=item_dir, progress=dl_cb
-                        ),
+                    path = await _download_media(
+                        client,
+                        m,
+                        file_name=item_dir,
                         timeout=dl_timeout,
                         operation=f"download album item {i + 1}/{total}",
+                        progress=dl_cb,
                     )
-                    path = _resolve_download_path(path, item_dir)
-                    if path and os.path.getsize(path) > 0:
+                    if path and os.path.isfile(path) and os.path.getsize(path) > 0:
                         break
                     path = None
                 except (asyncio.TimeoutError, Exception) as _dl_err:
@@ -923,15 +972,32 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
 
             if m.photo:
                 media_items.append(InputMediaPhoto(media=f, caption=caption))
-            elif _is_video_media(m):
-                # Thumbnail bersifat opsional dan tidak boleh menghambat
-                # pengiriman album setelah file berhasil di-download.
+            elif m.video:
+                thumbnail_path = await _create_video_thumbnail_async(path)
+                thumbnail_handle = None
+                if thumbnail_path:
+                    try:
+                        thumbnail_handle = open(thumbnail_path, "rb")
+                        thumbnail_paths.append(thumbnail_path)
+                        thumbnail_handles.append(thumbnail_handle)
+                    except OSError:
+                        thumbnail_handle = None
+                        try:
+                            os.remove(thumbnail_path)
+                        except OSError:
+                            pass
+                        thumbnail_path = None
+
+                video_kwargs = {}
+                if thumbnail_handle:
+                    video_kwargs["thumbnail"] = thumbnail_handle
                 media_items.append(
                     InputMediaVideo(
                         media=f,
                         caption=caption,
                         supports_streaming=True,
                         **_video_metadata(m),
+                        **video_kwargs,
                     )
                 )
             elif m.audio:
@@ -948,10 +1014,10 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
 
         if media_items:
             if on_progress:
-                try:
-                    await on_progress(f"📤 <b>Mengirim album...</b> ({len(paths)}/{total})")
-                except Exception:
-                    pass
+                await _notify_progress(
+                    on_progress,
+                    f"📤 <b>Mengirim album...</b> ({len(paths)}/{total})",
+                )
             # Timeout proporsional: 120 detik per file + 60 detik buffer
             _album_timeout = len(paths) * _ALBUM_UPLOAD_TIMEOUT_PER_FILE + 60
             await asyncio.wait_for(
@@ -994,7 +1060,7 @@ async def _pyrogram_copy_with_notice(client, bot, msg, user_chat_id: int, file_s
     Fallback untuk file besar (>50 MB) di channel private yang TIDAK restricted:
     Pyrogram meng-copy langsung ke chat bot user via MTProto (bypass batas 50 MB Bot API).
     """
-    bot_peer = _bot_peer()
+    bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
     await _hard_timeout(
         msg.copy(bot_peer),
         timeout=_UPLOAD_TIMEOUT,
@@ -1019,86 +1085,136 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
 
     try:
         try:
-            path = await _hard_timeout(
-                client.download_media(msg, file_name=work_dir, progress=dl_cb),
+            path = await _download_media(
+                client,
+                msg,
+                file_name=work_dir,
                 timeout=_DOWNLOAD_TIMEOUT,
                 operation=f"download message {getattr(msg, 'id', '?')}",
+                progress=dl_cb,
             )
         except asyncio.TimeoutError:
             raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
 
-        path = _resolve_download_path(path, work_dir)
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
+        await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
         # Kirim ke chat bot (bukan Saved Messages).
         # Dari sudut pandang Pyrogram (login sebagai user), mengirim ke @bot_username
         # membuat file muncul langsung di chat antara user dan bot.
-        bot_peer = _bot_peer()
+        bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
 
         ul_cb = _make_pyrogram_progress(on_progress, "Mengirim", file_size) if show_progress else None
         caption = _build_caption(msg.caption or "")
-        # Thumbnail tidak wajib dan proses FFmpeg tambahan berisiko memakai RAM
-        # besar untuk video ratusan MB. Video tetap bisa dikirim tanpa thumbnail.
-        # Thumbnail tidak wajib dan FFmpeg tidak boleh menahan pengiriman.
-        thumbnail_path = None
+        # Thumbnail dibuat setelah download selesai agar preview video tetap ada.
+        # Jika gagal, upload utama tetap diteruskan tanpa thumbnail.
+        thumbnail_path = (
+            await _create_video_thumbnail_async(path)
+            if msg.video else None
+        )
         metadata = _video_metadata(msg)
         if msg.photo:
-            await _hard_timeout(
-                client.send_photo(bot_peer, path, caption=caption, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_photo(
+                    bot_peer,
+                    path,
+                    caption=caption,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_photo",
+                progress=ul_cb,
             )
-        elif _is_video_media(msg):
-            await _hard_timeout(
-                client.send_video(
+        elif msg.video:
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_video(
                     bot_peer,
                     path,
                     caption=caption,
                     supports_streaming=True,
                     thumb=thumbnail_path,
-                    progress=ul_cb,
+                    progress=transfer_progress,
                     **metadata,
                 ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_video",
+                progress=ul_cb,
             )
         elif msg.audio:
-            await _hard_timeout(
-                client.send_audio(bot_peer, path, caption=caption, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_audio(
+                    bot_peer,
+                    path,
+                    caption=caption,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_audio",
+                progress=ul_cb,
             )
         elif msg.voice:
-            await _hard_timeout(
-                client.send_voice(bot_peer, path, caption=caption, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_voice(
+                    bot_peer,
+                    path,
+                    caption=caption,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_voice",
+                progress=ul_cb,
             )
         elif msg.video_note:
-            await _hard_timeout(
-                client.send_video_note(bot_peer, path, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_video_note(
+                    bot_peer,
+                    path,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_video_note",
+                progress=ul_cb,
             )
         elif msg.animation:
-            await _hard_timeout(
-                client.send_animation(bot_peer, path, caption=caption, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_animation(
+                    bot_peer,
+                    path,
+                    caption=caption,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_animation",
+                progress=ul_cb,
             )
         elif msg.sticker:
-            await _hard_timeout(
-                client.send_sticker(bot_peer, path, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_sticker(
+                    bot_peer,
+                    path,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_sticker",
+                progress=ul_cb,
             )
         else:
-            await _hard_timeout(
-                client.send_document(bot_peer, path, caption=caption, progress=ul_cb),
+            await _run_transfer_with_watchdog(
+                lambda transfer_progress: client.send_document(
+                    bot_peer,
+                    path,
+                    caption=caption,
+                    progress=transfer_progress,
+                ),
                 timeout=_UPLOAD_TIMEOUT,
                 operation="Pyrogram send_document",
+                progress=ul_cb,
             )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            "Upload timeout — koneksi Telegram terlalu lambat. Coba lagi."
+        ) from exc
     finally:
         if thumbnail_path:
             try:
@@ -1114,9 +1230,13 @@ async def _send_album_item(
     """Kirim satu item album melalui jalur yang sesuai dengan ukuran file."""
     caption = _build_caption(msg.caption or "")
     file_size = _get_file_size(msg) or 0
-    bot_peer = _bot_peer()
-    # Thumbnail tidak wajib; jalur fallback harus fokus mengirim media.
-    thumbnail_path = None
+    bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+    # Thumbnail dibuat untuk video, tetapi kegagalannya tidak boleh membatalkan
+    # jalur fallback pengiriman media.
+    thumbnail_path = (
+        await _create_video_thumbnail_async(path)
+        if msg.video else None
+    )
     metadata = _video_metadata(msg)
     _kw = dict(
         write_timeout=_PTB_WRITE_TIMEOUT,
@@ -1132,7 +1252,7 @@ async def _send_album_item(
                     timeout=_UPLOAD_TIMEOUT,
                     operation="Pyrogram album send_photo",
                 )
-            elif _is_video_media(msg):
+            elif msg.video:
                 await _hard_timeout(
                     client.send_video(
                         bot_peer,
@@ -1183,7 +1303,7 @@ async def _send_album_item(
                     bot.send_photo(user_chat_id, photo=f, caption=caption, **_kw),
                     timeout=_UPLOAD_TIMEOUT,
                 )
-            elif _is_video_media(msg):
+            elif msg.video:
                 if thumbnail_path:
                     with open(thumbnail_path, "rb") as thumb:
                         await asyncio.wait_for(
@@ -1290,25 +1410,23 @@ async def _send_album_individually(
                 file_size,
             )
         elif on_progress:
-            try:
-                await on_progress(
-                    f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})"
-                )
-            except Exception:
-                pass
+            await _notify_progress(
+                on_progress,
+                f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})",
+            )
         path = None
         item_dir = _new_download_dir(user_chat_id)
         for _dl_attempt in range(2):
             try:
-                path = await _hard_timeout(
-                    client.download_media(
-                        m, file_name=item_dir, progress=dl_cb
-                    ),
+                path = await _download_media(
+                    client,
+                    m,
+                    file_name=item_dir,
                     timeout=dl_timeout,
                     operation=f"download album fallback item {i + 1}/{total}",
+                    progress=dl_cb,
                 )
-                path = _resolve_download_path(path, item_dir)
-                if path and os.path.getsize(path) > 0:
+                if path and os.path.isfile(path) and os.path.getsize(path) > 0:
                     break
                 path = None
             except (asyncio.TimeoutError, Exception) as _dl_err:
@@ -1473,8 +1591,7 @@ class SafeForward:
 
         # ── Deteksi noforwards sebelum mencoba forward/copy ───────────────
         await _notify_progress(on_progress, "🔎 <b>Memeriksa akses media...</b>")
-        is_restricted = await _is_forwards_restricted(client, source_chat)
-        if is_restricted:
+        if await _is_forwards_restricted(client, source_chat):
             return await _send_album_individually(
                 client, bot, source_chat, msg_id, user_chat_id,
                 on_progress=on_progress, is_premium=is_premium,
@@ -1486,22 +1603,6 @@ class SafeForward:
                 album_messages = await _fetch_album_messages(
                     client, source_chat, msg_id
                 )
-
-                # Bot API tidak dapat mengunggah media di atas 50 MB.
-                # Hindari download berulang melalui send_media_group lalu
-                # fallback; langsung gunakan jalur MTProto per item.
-                if any(
-                    (_get_file_size(message) or 0) > _BOT_API_UPLOAD_LIMIT
-                    for message in album_messages
-                ):
-                    await _notify_progress(
-                        on_progress,
-                        "📤 <b>Mengirim media besar dari album...</b>",
-                    )
-                    return await _send_album_individually(
-                        client, bot, source_chat, msg_id, user_chat_id,
-                        on_progress=on_progress, is_premium=is_premium,
-                    )
 
                 # Album publik tidak perlu di-download ke Railway. Salin
                 # setiap item langsung dari channel melalui Bot API.
@@ -1662,20 +1763,13 @@ class SafeForward:
             try:
                 if msg.media:
                     if is_restricted:
-                        # Channel noforwards: skip copy_message & pyrogram copy —
-                        # keduanya akan ditolak Telegram. Langsung download + upload.
-                        if is_large:
-                            # File >50 MB: download via Pyrogram, upload ulang via Pyrogram MTProto
-                            # (bukan Bot API — tidak ada batas 50 MB), kirim ke Saved Messages user.
-                            await _download_and_upload_via_pyrogram(
-                                client, bot, msg, user_chat_id, file_size,
-                                on_progress=on_progress,
-                            )
-                        else:
-                            await _download_and_send_via_bot(
-                                client, bot, msg, user_chat_id,
-                                on_progress=on_progress,
-                            )
+                        # Channel noforwards: setelah download, selalu upload ulang
+                        # lewat Pyrogram MTProto. Bot API multipart sering macet pada
+                        # video 30–50 MB walaupun masih di bawah batas 50 MB.
+                        await _download_and_upload_via_pyrogram(
+                            client, bot, msg, user_chat_id, file_size,
+                            on_progress=on_progress,
+                        )
                         return True, None
                     else:
                         # Fast path: PTB bot.copy_message
@@ -1698,9 +1792,10 @@ class SafeForward:
                                 )
                                 return True, None
                             else:
-                                # File ≤50 MB — download Pyrogram, upload via bot
-                                await _download_and_send_via_bot(
-                                    client, bot, msg, user_chat_id,
+                                # Jika copy bot gagal, gunakan jalur MTProto
+                                # yang sama agar upload tidak tersangkut Bot API.
+                                await _download_and_upload_via_pyrogram(
+                                    client, bot, msg, user_chat_id, file_size,
                                     on_progress=on_progress,
                                 )
                                 return True, None
