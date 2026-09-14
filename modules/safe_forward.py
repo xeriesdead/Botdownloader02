@@ -600,6 +600,26 @@ async def _get_message(client, chat, msg_id: int):
         )
 
 
+async def inspect_message_media_size(
+    client, chat, msg_id: int,
+) -> tuple[bool, int | None]:
+    """
+    Baca metadata pesan tanpa mengunduh media.
+
+    Return (has_media, file_size). Dipakai sebagai pre-flight agar file yang
+    melewati batas user ditolak sebelum quota dipotong atau masuk antrian.
+    """
+    source_chat, source_error = await _resolve_source(client, chat)
+    if source_error:
+        raise RuntimeError(source_error)
+
+    message = await _get_message(client, source_chat, msg_id)
+    if not message or message.empty:
+        raise RuntimeError(f"Pesan `{msg_id}` kosong atau sudah dihapus.")
+
+    return bool(message.media), _get_file_size(message)
+
+
 def _get_file_size(msg) -> int | None:
     """Ambil ukuran file dari pesan, atau None jika tidak ada media."""
     for attr in ("document", "video", "audio", "voice", "video_note", "sticker", "animation"):

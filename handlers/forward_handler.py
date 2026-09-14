@@ -25,13 +25,21 @@ from modules.safe_forward import (
     SafeForward,
     check_channel_access,
     copy_public_message,
+    inspect_message_media_size,
+    _fmt_size,
     _hard_timeout,
 )
 from modules.channel_guard import require_member
 from modules.activity_log import log as activity_log
 from database.db import db
 from logger import logger
-from config import QUOTA_WARN_THRESHOLD
+from config import (
+    QUOTA_WARN_THRESHOLD,
+    MAX_FILE_SIZE_BYTES,
+    MAX_FILE_SIZE_MB,
+    MAX_FILE_SIZE_BYTES_PREMIUM,
+    MAX_FILE_SIZE_MB_PREMIUM,
+)
 
 _user_last:   dict[int, float]        = {}
 _user_locks:  dict[int, asyncio.Lock] = {}
@@ -61,6 +69,7 @@ _LINK_INVALID_TEXT = (
 )
 
 _SESSION_LOOKUP_TIMEOUT = 35
+_PREFLIGHT_SIZE_TIMEOUT = 60
 _LOCK_WAIT_TIMEOUT = 30
 _BULK_FETCH_TIMEOUT = 30
 _SINGLE_JOB_TIMEOUT = max(
@@ -412,26 +421,81 @@ def setup(app):
                     "❌ Kamu belum login.\nGunakan /login untuk menghubungkan akun Telegram."
                 )
 
-            # ── Pre-flight: cek akses channel SEBELUM potong quota ────────
-            # Channel publik akan dicoba langsung lewat Bot API di dalam job.
-            # Jangan menunggu session Pyrogram di sini karena lookup itulah
-            # yang dapat membuat request publik terlihat macet.
+            # ── Pre-flight: session, akses, dan ukuran SEBELUM potong quota ─
+            # Ukuran harus dibaca sebelum job masuk antrian. Jika tidak, file
+            # besar dapat terlihat stuck di "Sedang mengunduh" dan request
+            # berikutnya hanya menunggu di antrian.
+            try:
+                uc_check = await _hard_timeout(
+                    session_manager.get_for_chat(uid, chat),
+                    timeout=_SESSION_LOOKUP_TIMEOUT,
+                    operation=f"session lookup user {uid}",
+                )
+            except asyncio.TimeoutError:
+                return await update.message.reply_text(
+                    "⏱️ Bot timeout saat menghubungkan ke channel.\n"
+                    "Coba lagi beberapa saat lagi."
+                )
+
+            if not uc_check:
+                return await update.message.reply_text(
+                    "❌ Bot belum bisa membaca channel ini.\n"
+                    "Coba lagi beberapa saat lagi."
+                    if is_public_chat(chat)
+                    else "❌ Session tidak valid. Silakan /login ulang."
+                )
+
             if not is_public_chat(chat):
-                try:
-                    uc_check = await _hard_timeout(
-                        session_manager.get_for_chat(uid, chat),
-                        timeout=_SESSION_LOOKUP_TIMEOUT,
-                        operation=f"session lookup user {uid}",
-                    )
-                except asyncio.TimeoutError:
-                    return await update.message.reply_text(
-                        "⏱️ Bot timeout saat menghubungkan ke channel.\n"
-                        "Coba lagi beberapa saat lagi."
-                    )
                 if uc_check:
                     ok_access, err_access = await check_channel_access(uc_check, chat)
                     if not ok_access:
                         return await update.message.reply_text(err_access, parse_mode=ParseMode.HTML)
+
+            try:
+                has_media, file_size = await _hard_timeout(
+                    inspect_message_media_size(uc_check, chat, msg_id),
+                    timeout=_PREFLIGHT_SIZE_TIMEOUT,
+                    operation=f"inspect message size {chat}/{msg_id}",
+                )
+            except asyncio.TimeoutError:
+                return await update.message.reply_text(
+                    "⏱️ Bot timeout saat memeriksa ukuran media.\n"
+                    "Permintaan tidak dimasukkan ke antrian. Coba lagi beberapa saat lagi."
+                )
+            except Exception as exc:
+                logger.warning("Pre-flight ukuran gagal %s/%s: %s", chat, msg_id, exc)
+                return await update.message.reply_text(
+                    "⚠️ Ukuran media belum bisa diperiksa.\n"
+                    "Permintaan tidak dimasukkan ke antrian. Coba lagi beberapa saat lagi."
+                )
+
+            is_prem = QuotaService.is_premium(uid)
+            size_limit = (
+                MAX_FILE_SIZE_BYTES_PREMIUM if is_prem else MAX_FILE_SIZE_BYTES
+            )
+            size_label = (
+                f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
+                if is_prem else f"{MAX_FILE_SIZE_MB} MB (Free)"
+            )
+            if has_media and file_size is None:
+                return await update.message.reply_text(
+                    "⚠️ Ukuran media belum tersedia dari Telegram.\n"
+                    "Permintaan tidak dimasukkan ke antrian agar tidak stuck. "
+                    "Coba lagi beberapa saat lagi."
+                )
+            if file_size and file_size > size_limit:
+                return await update.message.reply_text(
+                    "❌ <b>File terlalu besar untuk akun kamu.</b>\n\n"
+                    f"📦 Ukuran file: <b>{_fmt_size(file_size)}</b>\n"
+                    f"📏 Batas akun {'Premium' if is_prem else 'Free'}: "
+                    f"<b>{size_label}</b>\n"
+                    + (
+                        "💎 Upgrade ke Premium untuk file hingga 2 GB."
+                        if not is_prem else
+                        "File Premium dibatasi maksimal 2 GB."
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
 
             if not QuotaService.use_quota(uid):
                 return await update.message.reply_text(
@@ -441,7 +505,6 @@ def setup(app):
                     parse_mode=ParseMode.HTML,
                 )
 
-            is_prem = QuotaService.is_premium(uid)
             lock    = _get_lock(uid)
 
             if not queue_manager.can_add(is_prem):
