@@ -322,7 +322,7 @@ async def _download_media(
     progress=None,
 ):
     """Download media via Pyrogram dengan watchdog transfer yang nyata."""
-    return await _run_transfer_with_watchdog(
+    downloaded = await _run_transfer_with_watchdog(
         lambda transfer_progress: client.download_media(
             media,
             file_name=file_name,
@@ -332,6 +332,31 @@ async def _download_media(
         operation=operation,
         progress=progress,
     )
+    if not downloaded:
+        return downloaded
+
+    # Pyrogram dapat mengembalikan folder tujuan ketika `file_name` berupa
+    # direktori. Telegram Bot API membutuhkan path file aktual, bukan folder.
+    if os.path.isfile(downloaded):
+        return downloaded
+
+    search_root = downloaded if os.path.isdir(downloaded) else file_name
+    if not os.path.isdir(search_root):
+        return downloaded
+
+    candidates = []
+    for root, _, names in os.walk(search_root):
+        for name in names:
+            candidate = os.path.join(root, name)
+            if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                candidates.append(candidate)
+
+    if not candidates:
+        return downloaded
+
+    # Satu media biasanya menghasilkan satu file. Jika ada metadata tambahan,
+    # pilih file media terbesar agar folder tetap aman dipakai sebagai target.
+    return max(candidates, key=os.path.getsize)
 
 
 async def copy_public_message(
