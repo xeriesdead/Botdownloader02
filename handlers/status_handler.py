@@ -1,4 +1,4 @@
-from telegram.ext import CommandHandler
+from telegram.ext import CallbackQueryHandler, CommandHandler
 from telegram.constants import ParseMode
 
 from database.db import db
@@ -145,19 +145,30 @@ def setup(app):
         )
 
     async def claim(update, context):
+        query = update.callback_query
+        if query:
+            await query.answer()
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+
         if not await require_member(context.bot, update):
             return
 
         uid = update.effective_user.id
         if not db.get_user(uid):
-            return await update.message.reply_text(
+            return await update.effective_message.reply_text(
                 "❌ Kamu belum terdaftar. Kirim /start dulu."
             )
+
+        async def reply(text, **kwargs):
+            return await update.effective_message.reply_text(text, **kwargs)
 
         result = QuotaService.claim_daily(uid)
         reason = result.get("reason")
         if result.get("claimed"):
-            await update.message.reply_text(
+            await reply(
                 "🎁 <b>Daily claim berhasil!</b>\n\n"
                 f"📦 Quota harian: <b>{result['quota']}/{MAX_DAILY_QUOTA}</b>\n"
                 f"📦 Total tersedia: <b>{result['total']}</b>\n\n"
@@ -165,20 +176,26 @@ def setup(app):
                 parse_mode=ParseMode.HTML,
             )
         elif reason == "already_claimed":
-            await update.message.reply_text(
+            await reply(
                 "⏳ <b>Daily claim sudah diambil hari ini.</b>\n\n"
                 "Claim berikutnya tersedia besok.",
                 parse_mode=ParseMode.HTML,
             )
         elif reason == "premium":
-            await update.message.reply_text(
+            await reply(
                 "💎 Akun Premium tidak memerlukan daily claim karena quota Unlimited."
             )
         else:
-            await update.message.reply_text(
+            await reply(
                 "❌ Daily claim belum bisa diproses. Coba lagi nanti."
             )
 
     app.add_handler(CommandHandler("status",  status))
     app.add_handler(CommandHandler("myquota", myquota))
     app.add_handler(CommandHandler("claim", claim))
+    # Terima callback baru dan callback lama agar tombol dari notifikasi yang
+    # sudah terkirim sebelum redeploy tetap bisa dipakai.
+    app.add_handler(CallbackQueryHandler(
+        claim,
+        pattern=r"^(daily_claim|claim_daily)$",
+    ))

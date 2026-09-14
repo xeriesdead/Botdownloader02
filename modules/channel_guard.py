@@ -85,7 +85,7 @@ async def require_member(bot: Bot, update) -> bool:
     ch       = _channel_display()
     keyboard = join_keyboard()
 
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "🔒 <b>Akses Terbatas</b>\n\n"
         f"Kamu wajib join channel <b>{ch}</b> terlebih dahulu sebelum menggunakan bot ini.\n\n"
         "Setelah join, kirim perintah kembali. ✅",

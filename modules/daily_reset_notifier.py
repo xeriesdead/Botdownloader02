@@ -1,6 +1,8 @@
 import asyncio
 from datetime import date, datetime, timedelta, timezone
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 from database.db import db
 from modules.quota_service import DAILY_CLAIM_AMOUNT, MAX_DAILY_QUOTA
 from logger import logger
@@ -31,6 +33,12 @@ async def _run_claim_notify(bot) -> tuple[int, int]:
 
     total   = len(users_to_notify)
     notified = 0
+    claim_markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "🎁 Claim quota hari ini",
+            callback_data="daily_claim",
+        )
+    ]])
 
     logger.info(f"[daily_claim] Mengirim pengingat claim ke {total} user...")
 
@@ -47,6 +55,7 @@ async def _run_claim_notify(bot) -> tuple[int, int]:
                     "Gunakan /claim untuk mengambil quota hari ini."
                 ),
                 parse_mode="HTML",
+                reply_markup=claim_markup,
             )
             notified += 1
         except Exception:
