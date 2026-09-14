@@ -1711,7 +1711,7 @@ class SafeForward:
           • Fast path (bot.copy_message): tanpa download, bebas ukuran, untuk channel terbuka
           • Slow path ≤50 MB: download via Pyrogram → re-upload via PTB bot
           • Fallback >50 MB private terbuka: Pyrogram copy → Saved Messages + notifikasi
-          • Fallback >50 MB restricted: tidak bisa dikirim (Bot API limit)
+          • Fallback >50 MB restricted: upload ulang via Pyrogram MTProto
         on_progress: async callable(text: str) untuk update progress ke user (opsional).
         """
         # ── Jalur cepat untuk channel publik ──────────────────────────────
@@ -1788,13 +1788,20 @@ class SafeForward:
             try:
                 if msg.media:
                     if is_restricted:
-                        # Channel noforwards: setelah download, selalu upload ulang
-                        # lewat Pyrogram MTProto. Bot API multipart sering macet pada
-                        # video 30–50 MB walaupun masih di bawah batas 50 MB.
-                        await _download_and_upload_via_pyrogram(
-                            client, bot, msg, user_chat_id, file_size,
-                            on_progress=on_progress,
-                        )
+                        # Channel noforwards: download tetap dilakukan lewat Pyrogram,
+                        # tetapi file kecil harus di-upload oleh bot agar pengirimnya
+                        # tetap bot. Hanya file >50 MB yang memakai akun Pyrogram,
+                        # karena melewati batas upload Bot API.
+                        if is_large:
+                            await _download_and_upload_via_pyrogram(
+                                client, bot, msg, user_chat_id, file_size,
+                                on_progress=on_progress,
+                            )
+                        else:
+                            await _download_and_send_via_bot(
+                                client, bot, msg, user_chat_id,
+                                on_progress=on_progress,
+                            )
                         return True, None
                     else:
                         # Fast path: PTB bot.copy_message
@@ -1817,10 +1824,11 @@ class SafeForward:
                                 )
                                 return True, None
                             else:
-                                # Jika copy bot gagal, gunakan jalur MTProto
-                                # yang sama agar upload tidak tersangkut Bot API.
-                                await _download_and_upload_via_pyrogram(
-                                    client, bot, msg, user_chat_id, file_size,
+                                # File kecil tetap di-upload oleh bot setelah
+                                # download ulang. Jalur Pyrogram hanya diperlukan
+                                # untuk file yang melewati batas Bot API.
+                                await _download_and_send_via_bot(
+                                    client, bot, msg, user_chat_id,
                                     on_progress=on_progress,
                                 )
                                 return True, None
