@@ -179,9 +179,10 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
 _PEER_RESOLVE_TIMEOUT  = 20   # detik — batas waktu resolve peer & get_chat
 _MSG_FETCH_TIMEOUT     = 25   # detik — batas waktu get_messages
 _ACCESS_CHECK_TIMEOUT  = 12   # detik — batas waktu pre-flight cek akses channel
-_DOWNLOAD_TIMEOUT      = 120  # detik — batas waktu download satu file via Pyrogram (2 menit)
+_DOWNLOAD_TIMEOUT      = 120  # detik — timeout dasar download file kecil
 _DOWNLOAD_STALL_TIMEOUT = 45  # detik tanpa byte baru sebelum transfer dibatalkan
-_UPLOAD_TIMEOUT        = 300  # detik — batas waktu upload satu file ke Bot API (5 menit)
+_UPLOAD_TIMEOUT        = 300  # detik — timeout dasar upload file kecil
+_LARGE_TRANSFER_TIMEOUT_MAX = 2 * 60 * 60  # transfer Premium besar maksimal 2 jam
 _ALBUM_FETCH_TIMEOUT   = 30   # detik — batas waktu mengambil metadata album
 _ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file — dipakai di _send_album_via_bot
 _BOT_COPY_TIMEOUT      = 30   # detik — jalur cepat untuk pesan channel publik
@@ -192,6 +193,17 @@ _TRANSFER_POLL_INTERVAL = 2  # detik — frekuensi pemeriksaan watchdog transfer
 _PTB_WRITE_TIMEOUT   = 90    # detik
 _PTB_READ_TIMEOUT    = 60    # detik
 _PTB_CONNECT_TIMEOUT = 15    # detik
+
+
+def _media_transfer_timeout(file_size: int | None, base_timeout: int) -> int:
+    """Beri waktu proporsional untuk transfer media besar tanpa mengubah file kecil."""
+    if not file_size:
+        return base_timeout
+    size_mb = file_size / (1024 * 1024)
+    return max(
+        base_timeout,
+        min(_LARGE_TRANSFER_TIMEOUT_MAX, int(size_mb * 1.5) + 30),
+    )
 
 
 def _consume_cancelled_task(task: asyncio.Task):
@@ -1119,12 +1131,14 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
     Untuk file besar (>50 MB) dari channel restricted:
     Download file via Pyrogram lalu upload ulang langsung ke chat bot user via MTProto.
     Bypass sekaligus: batas 50 MB Bot API + larangan forward/copy dari channel restricted.
-    File bisa sampai 1 GB (sesuai MAX_FILE_SIZE_BYTES di config).
+    File Premium bisa sampai 2 GB (sesuai MAX_FILE_SIZE_BYTES_PREMIUM di config).
     on_progress: async callable(text: str) untuk update pesan status (opsional).
     """
     show_progress = on_progress and file_size >= _PROGRESS_MIN_BYTES
     dl_cb = _make_pyrogram_progress(on_progress, "Mengunduh", file_size) if show_progress else None
     work_dir = _new_download_dir(user_chat_id)
+    transfer_timeout = _media_transfer_timeout(file_size, _DOWNLOAD_TIMEOUT)
+    upload_timeout = _media_transfer_timeout(file_size, _UPLOAD_TIMEOUT)
     path = None
     thumbnail_path = None
 
@@ -1134,7 +1148,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                 client,
                 msg,
                 file_name=work_dir,
-                timeout=_DOWNLOAD_TIMEOUT,
+                timeout=transfer_timeout,
                 operation=f"download message {getattr(msg, 'id', '?')}",
                 progress=dl_cb,
             )
@@ -1167,7 +1181,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     caption=caption,
                     progress=transfer_progress,
                 ),
-                timeout=_UPLOAD_TIMEOUT,
+                timeout=upload_timeout,
                 operation="Pyrogram send_photo",
                 progress=ul_cb,
             )
@@ -1182,7 +1196,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     progress=transfer_progress,
                     **metadata,
                 ),
-                timeout=_UPLOAD_TIMEOUT,
+                timeout=upload_timeout,
                 operation="Pyrogram send_video",
                 progress=ul_cb,
             )
@@ -1194,7 +1208,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     caption=caption,
                     progress=transfer_progress,
                 ),
-                timeout=_UPLOAD_TIMEOUT,
+                timeout=upload_timeout,
                 operation="Pyrogram send_audio",
                 progress=ul_cb,
             )
@@ -1206,7 +1220,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     caption=caption,
                     progress=transfer_progress,
                 ),
-                timeout=_UPLOAD_TIMEOUT,
+                timeout=upload_timeout,
                 operation="Pyrogram send_voice",
                 progress=ul_cb,
             )
@@ -1217,7 +1231,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     path,
                     progress=transfer_progress,
                 ),
-                timeout=_UPLOAD_TIMEOUT,
+                timeout=upload_timeout,
                 operation="Pyrogram send_video_note",
                 progress=ul_cb,
             )
@@ -1229,7 +1243,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     caption=caption,
                     progress=transfer_progress,
                 ),
-                timeout=_UPLOAD_TIMEOUT,
+                timeout=upload_timeout,
                 operation="Pyrogram send_animation",
                 progress=ul_cb,
             )
@@ -1240,7 +1254,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     path,
                     progress=transfer_progress,
                 ),
-                timeout=_UPLOAD_TIMEOUT,
+                timeout=upload_timeout,
                 operation="Pyrogram send_sticker",
                 progress=ul_cb,
             )
@@ -1252,7 +1266,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     caption=caption,
                     progress=transfer_progress,
                 ),
-                timeout=_UPLOAD_TIMEOUT,
+                timeout=upload_timeout,
                 operation="Pyrogram send_document",
                 progress=ul_cb,
             )
@@ -1294,7 +1308,7 @@ async def _send_album_item(
             if msg.photo:
                 await _hard_timeout(
                     client.send_photo(bot_peer, path, caption=caption),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                     operation="Pyrogram album send_photo",
                 )
             elif msg.video:
@@ -1307,37 +1321,37 @@ async def _send_album_item(
                         thumb=thumbnail_path,
                         **metadata,
                     ),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                     operation="Pyrogram album send_video",
                 )
             elif msg.audio:
                 await _hard_timeout(
                     client.send_audio(bot_peer, path, caption=caption),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                     operation="Pyrogram album send_audio",
                 )
             elif msg.voice:
                 await _hard_timeout(
                     client.send_voice(bot_peer, path, caption=caption),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                     operation="Pyrogram album send_voice",
                 )
             elif msg.video_note:
                 await _hard_timeout(
                     client.send_video_note(bot_peer, path),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                     operation="Pyrogram album send_video_note",
                 )
             elif msg.animation:
                 await _hard_timeout(
                     client.send_animation(bot_peer, path, caption=caption),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                     operation="Pyrogram album send_animation",
                 )
             else:
                 await _hard_timeout(
                     client.send_document(bot_peer, path, caption=caption),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                     operation="Pyrogram album send_document",
                 )
             return
@@ -1346,7 +1360,7 @@ async def _send_album_item(
             if msg.photo:
                 await asyncio.wait_for(
                     bot.send_photo(user_chat_id, photo=f, caption=caption, **_kw),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                 )
             elif msg.video:
                 if thumbnail_path:
@@ -1361,7 +1375,7 @@ async def _send_album_item(
                                 **metadata,
                                 **_kw,
                             ),
-                            timeout=_UPLOAD_TIMEOUT,
+                            timeout=upload_timeout,
                         )
                 else:
                     await asyncio.wait_for(
@@ -1373,27 +1387,27 @@ async def _send_album_item(
                             **metadata,
                             **_kw,
                         ),
-                        timeout=_UPLOAD_TIMEOUT,
+                        timeout=upload_timeout,
                     )
             elif msg.audio:
                 await asyncio.wait_for(
                     bot.send_audio(user_chat_id, audio=f, caption=caption, **_kw),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                 )
             elif msg.voice:
                 await asyncio.wait_for(
                     bot.send_voice(user_chat_id, voice=f, caption=caption, **_kw),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                 )
             elif msg.animation:
                 await asyncio.wait_for(
                     bot.send_animation(user_chat_id, animation=f, caption=caption, **_kw),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                 )
             else:
                 await asyncio.wait_for(
                     bot.send_document(user_chat_id, document=f, caption=caption, **_kw),
-                    timeout=_UPLOAD_TIMEOUT,
+                    timeout=upload_timeout,
                 )
     finally:
         if thumbnail_path:
