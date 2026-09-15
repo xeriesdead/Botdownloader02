@@ -1290,6 +1290,7 @@ async def _send_album_item(
     caption = _build_caption(msg.caption or "")
     file_size = _get_file_size(msg) or 0
     bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+    upload_timeout = _media_transfer_timeout(file_size, _UPLOAD_TIMEOUT)
     # Thumbnail dibuat untuk video, tetapi kegagalannya tidak boleh membatalkan
     # jalur fallback pengiriman media.
     thumbnail_path = (
