@@ -1,6 +1,5 @@
-# Container image untuk mode polling Telegram bot.
-# Proses ini harus tetap hidup, sehingga cocok untuk Railway atau hosting
-# always-on lainnya.
+# Container image untuk mode webhook Telegram bot.
+# Server HTTP menerima update Telegram melalui webhook.
 
 FROM python:3.12-slim
 
@@ -23,4 +22,4 @@ RUN useradd --create-home --shell /usr/sbin/nologin appuser \
 
 USER appuser
 
-CMD ["python", "main.py"]
+CMD ["python", "webhook_server.py"]
