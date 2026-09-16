@@ -942,16 +942,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
     on_progress: async callable(text: str) untuk update status (opsional).
     """
     if messages is None:
-        try:
-                msgs = await _hard_timeout(
-                    client.get_media_group(chat, msg_id),
-                    timeout=_ALBUM_FETCH_TIMEOUT,
-                    operation=f"get_media_group({chat}, {msg_id})",
-            )
-        except asyncio.TimeoutError:
-            raise RuntimeError(
-                "Timeout saat mengambil metadata album dari Telegram."
-            )
+        msgs = await _fetch_album_messages(client, chat, msg_id)
     else:
         msgs = messages
     total = len(msgs)
@@ -1433,11 +1424,7 @@ async def _send_album_individually(
         msgs = messages
     else:
         try:
-            msgs = await _hard_timeout(
-                client.get_media_group(chat, msg_id),
-                timeout=_ALBUM_FETCH_TIMEOUT,
-                operation=f"get_media_group({chat}, {msg_id})",
-            )
+            msgs = await _fetch_album_messages(client, chat, msg_id)
         except Exception as e:
             return False, f"Gagal mengambil album: {e}"
 
@@ -1557,18 +1544,68 @@ async def _send_album_individually(
     return True, None
 
 
+_ALBUM_MESSAGE_WINDOW = 10
+
+
 async def _fetch_album_messages(client, chat, msg_id: int):
-    """Ambil metadata album sekali dengan batas waktu yang tegas."""
-    try:
-        return await _hard_timeout(
-            client.get_media_group(chat, msg_id),
+    """Ambil anggota album lewat raw MTProto, tanpa wrapper get_media_group."""
+    peer = await _hard_timeout(
+        client.resolve_peer(chat),
+        timeout=_PEER_RESOLVE_TIMEOUT,
+        operation=f"resolve_peer({chat}) for album",
+    )
+    ids = [
+        msg_id + offset
+        for offset in range(-_ALBUM_MESSAGE_WINDOW, _ALBUM_MESSAGE_WINDOW + 1)
+        if msg_id + offset > 0
+    ]
+    raw_ids = [raw.types.InputMessageID(id=message_id) for message_id in ids]
+    if isinstance(peer, raw.types.InputPeerChannel):
+        result = await _hard_timeout(
+            client.invoke(
+                raw.functions.channels.GetMessages(channel=peer, id=raw_ids)
+            ),
             timeout=_ALBUM_FETCH_TIMEOUT,
-            operation=f"get_media_group({chat}, {msg_id})",
+            operation=f"channels.GetMessages album({chat}, {msg_id})",
         )
-    except asyncio.TimeoutError:
-        raise RuntimeError(
-            "Timeout saat mengambil metadata album dari Telegram."
+    else:
+        result = await _hard_timeout(
+            client.invoke(raw.functions.messages.GetMessages(id=raw_ids)),
+            timeout=_ALBUM_FETCH_TIMEOUT,
+            operation=f"messages.GetMessages album({chat}, {msg_id})",
         )
+
+    parsed_messages = []
+    for raw_message in getattr(result, "messages", None) or []:
+        parsed = Message._parse(
+            client,
+            raw_message,
+            getattr(result, "users", None) or [],
+            getattr(result, "chats", None) or [],
+        )
+        if hasattr(parsed, "__await__"):
+            parsed = await parsed
+        if parsed and not getattr(parsed, "empty", False):
+            parsed_messages.append(parsed)
+
+    target = next(
+        (message for message in parsed_messages
+         if getattr(message, "id", None) == msg_id),
+        None,
+    )
+    if target is None:
+        raise RuntimeError(f"Pesan album {msg_id} tidak ditemukan.")
+
+    group_id = getattr(target, "media_group_id", None)
+    if not group_id:
+        return [target]
+
+    album = sorted(
+        (message for message in parsed_messages
+         if getattr(message, "media_group_id", None) == group_id),
+        key=lambda message: message.id,
+    )
+    return album or [target]
 
 
 async def _copy_public_album(
