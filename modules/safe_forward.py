@@ -1555,93 +1555,42 @@ _ALBUM_MESSAGE_WINDOW = 10
 
 
 async def _fetch_album_messages(client, chat, msg_id: int, on_progress=None):
-    """Ambil album dengan API media-group yang dibatasi timeout."""
+    """Ambil seluruh album dengan satu request metadata MTProto."""
     await _notify_progress(
         on_progress, "📥 <b>Mengambil metadata album...</b>"
     )
-    try:
-        grouped_messages = await _hard_timeout(
-            client.get_media_group(chat, msg_id),
-            timeout=min(15, _ALBUM_FETCH_TIMEOUT),
-            operation=f"get_media_group({chat}, {msg_id})",
-        )
-        grouped_messages = sorted(
-            [
-                message for message in (grouped_messages or [])
-                if message and not getattr(message, "empty", False)
-            ],
-            key=lambda message: message.id,
-        )
-        if grouped_messages:
-            return grouped_messages
-    except asyncio.TimeoutError:
-        # Do not retry another potentially blocking wrapper call. The caller
-        # returns a clear timeout message instead of leaving the status stuck.
-        logger.warning("get_media_group timeout for %s/%s", chat, msg_id)
-        raise
-    except Exception as group_error:
-        # Some Pyrogram/Pyrofork versions cannot resolve certain private
-        # peers through get_media_group. Keep the bounded raw fallback for
-        # those fast failures.
-        logger.warning(
-            "get_media_group failed for %s/%s, using raw fallback: %s",
-            chat,
-            msg_id,
-            group_error,
-        )
-
     peer = await _hard_timeout(
         client.resolve_peer(chat),
         timeout=_PEER_RESOLVE_TIMEOUT,
         operation=f"resolve_peer({chat}) for album",
     )
 
-    async def _fetch_one(message_id: int, timeout: float):
-        message_input = raw.types.InputMessageID(id=message_id)
-        if isinstance(peer, raw.types.InputPeerChannel):
-            channel = raw.types.InputChannel(
-                channel_id=peer.channel_id,
-                access_hash=peer.access_hash,
-            )
-            request = raw.functions.channels.GetMessages(
-                channel=channel,
-                id=[message_input],
-            )
-        else:
-            request = raw.functions.messages.GetMessages(
-                id=[message_input],
-            )
-        try:
-            result = await _hard_timeout(
-                client.invoke(request),
-                timeout=timeout,
-                operation=f"get album message({chat}, {message_id})",
-            )
-        except (asyncio.TimeoutError, MessageIdInvalid, MsgIdInvalid):
-            raise
-        except _PEER_ERRORS:
-            raise
-        except Exception as raw_error:
-            # Keep compatibility with Pyrogram versions where the raw
-            # constructor differs, but never allow the fallback to hang.
-            logger.warning(
-                "Raw album message fetch failed for %s/%s, using wrapper: %s",
-                chat,
-                message_id,
-                raw_error,
-            )
-            result = await _hard_timeout(
-                client.get_messages(chat, message_id),
-                timeout=timeout,
-                operation=f"get album wrapper message({chat}, {message_id})",
-            )
-            if isinstance(result, list):
-                return result[0] if result else None
-            return result
-        raw_messages = getattr(result, "messages", None) or []
-        if not raw_messages:
-            return None
-        raw_message = raw_messages[0]
+    first_id = max(1, msg_id - _ALBUM_MESSAGE_WINDOW)
+    last_id = msg_id + _ALBUM_MESSAGE_WINDOW
+    request_ids = [
+        raw.types.InputMessageID(id=message_id)
+        for message_id in range(first_id, last_id + 1)
+    ]
+    if isinstance(peer, raw.types.InputPeerChannel):
+        channel = raw.types.InputChannel(
+            channel_id=peer.channel_id,
+            access_hash=peer.access_hash,
+        )
+        request = raw.functions.channels.GetMessages(
+            channel=channel,
+            id=request_ids,
+        )
+    else:
+        request = raw.functions.messages.GetMessages(id=request_ids)
+
+    result = await _hard_timeout(
+        client.invoke(request),
+        timeout=_ALBUM_FETCH_TIMEOUT,
+        operation=f"get album range({chat}, {first_id}-{last_id})",
+    )
+    raw_messages = getattr(result, "messages", None) or []
+    parsed_messages = []
+    for raw_message in raw_messages:
         parsed = Message._parse(
             client,
             raw_message,
@@ -1650,15 +1599,13 @@ async def _fetch_album_messages(client, chat, msg_id: int, on_progress=None):
         )
         if hasattr(parsed, "__await__"):
             parsed = await parsed
-        return parsed if parsed and not getattr(parsed, "empty", False) else None
+        if parsed and not getattr(parsed, "empty", False):
+            parsed_messages.append(parsed)
 
-    target = await _fetch_one(msg_id, min(15, _ALBUM_FETCH_TIMEOUT))
-    probed = 1
-    if on_progress:
-        await _notify_progress(
-            on_progress,
-            f"📥 <b>Mengambil album...</b> (memeriksa pesan {probed})",
-        )
+    target = next(
+        (message for message in parsed_messages if message.id == msg_id),
+        None,
+    )
     if target is None:
         raise RuntimeError(f"Pesan album {msg_id} tidak ditemukan.")
 
@@ -1666,41 +1613,16 @@ async def _fetch_album_messages(client, chat, msg_id: int, on_progress=None):
     if not group_id:
         return [target]
 
-    messages = [target]
-    # Album Telegram berisi pesan berurutan. Baca ke kiri/kanan satu per satu;
-    # berhenti saat menemukan pesan yang bukan bagian dari group yang sama.
-    for direction in (-1, 1):
-        for distance in range(1, _ALBUM_MESSAGE_WINDOW + 1):
-            candidate_id = msg_id + (direction * distance)
-            if candidate_id <= 0:
-                break
-            try:
-                candidate = await _fetch_one(candidate_id, 5)
-            except (asyncio.TimeoutError, MessageIdInvalid, MsgIdInvalid, Exception) as e:
-                probed += 1
-                if on_progress:
-                    await _notify_progress(
-                        on_progress,
-                        f"📥 <b>Mengambil album...</b> (memeriksa pesan {probed})",
-                    )
-                logger.debug(
-                    "Album neighbor %s/%s berhenti: %s",
-                    chat,
-                    candidate_id,
-                    e,
-                )
-                break
-            probed += 1
-            if on_progress:
-                await _notify_progress(
-                    on_progress,
-                    f"📥 <b>Mengambil album...</b> (memeriksa pesan {probed})",
-                )
-            if not candidate or getattr(candidate, "media_group_id", None) != group_id:
-                break
-            messages.append(candidate)
-
-    return sorted(messages, key=lambda message: message.id)
+    album_messages = [
+        message for message in parsed_messages
+        if getattr(message, "media_group_id", None) == group_id
+    ]
+    if on_progress:
+        await _notify_progress(
+            on_progress,
+            f"📥 <b>Album ditemukan</b> ({len(album_messages)} media)",
+        )
+    return sorted(album_messages, key=lambda message: message.id)
 
 
 async def _copy_public_album(
