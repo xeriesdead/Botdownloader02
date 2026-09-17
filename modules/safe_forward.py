@@ -1785,6 +1785,25 @@ class SafeForward:
                         messages=album_messages,
                     )
 
+                # Link /c/... berasal dari chat privat. Jangan gunakan
+                # send_media_group Bot API untuk jalur ini: Bot API tidak
+                # dapat membaca chat privat dan album yang berisi video besar
+                # akan menunggu sampai seluruh group siap sebelum memberi
+                # fallback. Kirim per item lewat jalur yang sama dengan
+                # protected content agar setiap media punya progres, timeout,
+                # dan pembersihan file sendiri.
+                if not (isinstance(chat, str) and chat.startswith("@")):
+                    await _notify_progress(
+                        on_progress,
+                        f"📥 <b>Album ditemukan</b> ({len(album_messages)} media)\n"
+                        "🔄 <b>Menyiapkan pengiriman satu per satu...</b>",
+                    )
+                    return await _send_album_individually(
+                        client, bot, source_chat, msg_id, user_chat_id,
+                        on_progress=on_progress, is_premium=is_premium,
+                        messages=album_messages,
+                    )
+
                 # Album publik tidak perlu di-download ke Railway. Salin
                 # setiap item langsung dari channel melalui Bot API.
                 if not is_restricted:
