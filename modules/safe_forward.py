@@ -1555,7 +1555,41 @@ _ALBUM_MESSAGE_WINDOW = 10
 
 
 async def _fetch_album_messages(client, chat, msg_id: int, on_progress=None):
-    """Ambil album secara sequential dan laporkan progres pencarian metadata."""
+    """Ambil album dengan API media-group yang dibatasi timeout."""
+    await _notify_progress(
+        on_progress, "📥 <b>Mengambil metadata album...</b>"
+    )
+    try:
+        grouped_messages = await _hard_timeout(
+            client.get_media_group(chat, msg_id),
+            timeout=min(15, _ALBUM_FETCH_TIMEOUT),
+            operation=f"get_media_group({chat}, {msg_id})",
+        )
+        grouped_messages = sorted(
+            [
+                message for message in (grouped_messages or [])
+                if message and not getattr(message, "empty", False)
+            ],
+            key=lambda message: message.id,
+        )
+        if grouped_messages:
+            return grouped_messages
+    except asyncio.TimeoutError:
+        # Do not retry another potentially blocking wrapper call. The caller
+        # returns a clear timeout message instead of leaving the status stuck.
+        logger.warning("get_media_group timeout for %s/%s", chat, msg_id)
+        raise
+    except Exception as group_error:
+        # Some Pyrogram/Pyrofork versions cannot resolve certain private
+        # peers through get_media_group. Keep the bounded raw fallback for
+        # those fast failures.
+        logger.warning(
+            "get_media_group failed for %s/%s, using raw fallback: %s",
+            chat,
+            msg_id,
+            group_error,
+        )
+
     peer = await _hard_timeout(
         client.resolve_peer(chat),
         timeout=_PEER_RESOLVE_TIMEOUT,
