@@ -184,6 +184,7 @@ _DOWNLOAD_STALL_TIMEOUT = 45  # detik tanpa byte baru sebelum transfer dibatalka
 _UPLOAD_TIMEOUT        = 300  # detik â timeout dasar upload file kecil
 _LARGE_TRANSFER_TIMEOUT_MAX = 2 * 60 * 60  # transfer Premium besar maksimal 2 jam
 _ALBUM_FETCH_TIMEOUT   = 30   # detik â batas waktu mengambil metadata album
+_ALBUM_WRAPPER_TIMEOUT  = 15   # detik â batas jalur get_media_group sebelum raw fallback
 _ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file â dipakai di _send_album_via_bot
 _BOT_COPY_TIMEOUT      = 30   # detik â jalur cepat untuk pesan channel publik
 _PROGRESS_CALLBACK_TIMEOUT = 5  # update status tidak boleh menahan transfer
@@ -1555,10 +1556,42 @@ _ALBUM_MESSAGE_WINDOW = 10
 
 
 async def _fetch_album_messages(client, chat, msg_id: int, on_progress=None):
-    """Ambil seluruh album dengan satu request metadata MTProto."""
+    """Ambil seluruh album dengan fallback wrapper/raw yang dibatasi waktu."""
     await _notify_progress(
         on_progress, "📥 <b>Mengambil metadata album...</b>"
     )
+
+    # get_media_group adalah jalur Pyrogram yang paling kompatibel untuk
+    # album. Gunakan numeric chat ID hasil resolve agar tidak memicu lookup
+    # username kedua. Jalur ini sengaja dibatasi; beberapa session dapat
+    # menggantung di wrapper sehingga raw MTProto tetap diperlukan sebagai
+    # fallback.
+    try:
+        wrapper_messages = await _hard_timeout(
+            client.get_media_group(chat, msg_id),
+            timeout=_ALBUM_WRAPPER_TIMEOUT,
+            operation=f"get_media_group({chat}, {msg_id})",
+        )
+        if wrapper_messages:
+            album_messages = sorted(wrapper_messages, key=lambda message: message.id)
+            await _notify_progress(
+                on_progress,
+                f"📥 <b>Album ditemukan</b> ({len(album_messages)} media)",
+            )
+            return album_messages
+    except asyncio.TimeoutError:
+        logger.warning(
+            "get_media_group timeout for %s/%s; mencoba raw MTProto",
+            chat, msg_id,
+        )
+    except Exception as wrapper_error:
+        logger.warning(
+            "get_media_group gagal untuk %s/%s; mencoba raw MTProto: %s",
+            chat, msg_id, wrapper_error,
+        )
+
+    # Fallback raw menghindari lookup wrapper yang dapat berhenti setelah peer
+    # berhasil di-resolve. Ini juga tetap dibatasi oleh timeout di setiap tahap.
     peer = await _hard_timeout(
         client.resolve_peer(chat),
         timeout=_PEER_RESOLVE_TIMEOUT,
@@ -1720,7 +1753,12 @@ class SafeForward:
                         _fetch_album_messages(
                             client, source_chat, msg_id, on_progress=on_progress
                         ),
-                        timeout=_ALBUM_FETCH_TIMEOUT + 8,
+                        timeout=(
+                            _ALBUM_WRAPPER_TIMEOUT
+                            + _PEER_RESOLVE_TIMEOUT
+                            + _ALBUM_FETCH_TIMEOUT
+                            + 8
+                        ),
                         operation=f"fetch album({source_chat}, {msg_id})",
                     )
                 except asyncio.TimeoutError:
