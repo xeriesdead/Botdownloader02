@@ -554,10 +554,17 @@ async def _get_message_via_raw_api(client, chat, msg_id: int):
     message_id = raw.types.InputMessageID(id=msg_id)
 
     if isinstance(peer, raw.types.InputPeerChannel):
+        # channels.getMessages expects InputChannel, not InputPeerChannel.
+        # Both carry the same channel identifiers, but Telegram treats them
+        # as different MTProto constructors.
+        channel = raw.types.InputChannel(
+            channel_id=peer.channel_id,
+            access_hash=peer.access_hash,
+        )
         result = await _hard_timeout(
             client.invoke(
                 raw.functions.channels.GetMessages(
-                    channel=peer,
+                    channel=channel,
                     id=[message_id],
                 )
             ),
@@ -1558,19 +1565,45 @@ async def _fetch_album_messages(client, chat, msg_id: int, on_progress=None):
     async def _fetch_one(message_id: int, timeout: float):
         message_input = raw.types.InputMessageID(id=message_id)
         if isinstance(peer, raw.types.InputPeerChannel):
+            channel = raw.types.InputChannel(
+                channel_id=peer.channel_id,
+                access_hash=peer.access_hash,
+            )
             request = raw.functions.channels.GetMessages(
-                channel=peer,
+                channel=channel,
                 id=[message_input],
             )
         else:
             request = raw.functions.messages.GetMessages(
                 id=[message_input],
             )
-        result = await _hard_timeout(
-            client.invoke(request),
-            timeout=timeout,
-            operation=f"get album message({chat}, {message_id})",
-        )
+        try:
+            result = await _hard_timeout(
+                client.invoke(request),
+                timeout=timeout,
+                operation=f"get album message({chat}, {message_id})",
+            )
+        except (asyncio.TimeoutError, MessageIdInvalid, MsgIdInvalid):
+            raise
+        except _PEER_ERRORS:
+            raise
+        except Exception as raw_error:
+            # Keep compatibility with Pyrogram versions where the raw
+            # constructor differs, but never allow the fallback to hang.
+            logger.warning(
+                "Raw album message fetch failed for %s/%s, using wrapper: %s",
+                chat,
+                message_id,
+                raw_error,
+            )
+            result = await _hard_timeout(
+                client.get_messages(chat, message_id),
+                timeout=timeout,
+                operation=f"get album wrapper message({chat}, {message_id})",
+            )
+            if isinstance(result, list):
+                return result[0] if result else None
+            return result
         raw_messages = getattr(result, "messages", None) or []
         if not raw_messages:
             return None
