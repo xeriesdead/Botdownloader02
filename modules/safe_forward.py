@@ -1548,7 +1548,7 @@ _ALBUM_MESSAGE_WINDOW = 10
 
 
 async def _fetch_album_messages(client, chat, msg_id: int, on_progress=None):
-    """Ambil album secara sequential dan laporkan progres pencarian metadata.""
+    """Ambil album secara sequential dan laporkan progres pencarian metadata."""
     peer = await _hard_timeout(
         client.resolve_peer(chat),
         timeout=_PEER_RESOLVE_TIMEOUT,
