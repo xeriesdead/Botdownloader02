@@ -453,7 +453,7 @@ def setup(app):
                         return await update.message.reply_text(err_access, parse_mode=ParseMode.HTML)
 
             try:
-                has_media, file_size = await _hard_timeout(
+                has_media, file_size, is_album = await _hard_timeout(
                     inspect_message_media_size(uc_check, chat, msg_id),
                     timeout=_PREFLIGHT_SIZE_TIMEOUT,
                     operation=f"inspect message size {chat}/{msg_id}",
@@ -479,12 +479,35 @@ def setup(app):
                 if is_prem else f"{MAX_FILE_SIZE_MB} MB (Free)"
             )
             if has_media and file_size is None:
-                return await update.message.reply_text(
+                size_check_message = (
+                    "⚠️ Ukuran media album belum tersedia dari Telegram.\n"
+                    if is_album else
                     "⚠️ Ukuran media belum tersedia dari Telegram.\n"
+                )
+                return await update.message.reply_text(
+                    size_check_message +
                     "Permintaan tidak dimasukkan ke antrian agar tidak stuck. "
                     "Coba lagi beberapa saat lagi."
                 )
             if file_size and file_size > size_limit:
+                if is_album:
+                    if is_prem:
+                        return await update.message.reply_text(
+                            "❌ <b>Album memiliki media yang terlalu besar.</b>\n\n"
+                            f"📦 Media terbesar dalam album: <b>{_fmt_size(file_size)}</b>\n"
+                            f"📏 Batas akun Premium: <b>{size_label}</b>",
+                            parse_mode=ParseMode.HTML,
+                        )
+                    return await update.message.reply_text(
+                        "❌ <b>Album tidak dapat diproses oleh akun Free.</b>\n\n"
+                        f"📦 Media terbesar dalam album: <b>{_fmt_size(file_size)}</b>\n"
+                        f"📏 Batas akun Free: <b>{size_label}</b>\n\n"
+                        "Bot berjalan normal dan permintaan dihentikan sebelum "
+                        "download agar tidak terlihat stuck.\n"
+                        "💎 Upgrade ke Premium untuk mengirim file hingga "
+                        f"<b>{MAX_FILE_SIZE_MB_PREMIUM} MB</b>.",
+                        parse_mode=ParseMode.HTML,
+                    )
                 return await update.message.reply_text(
                     "❌ <b>File terlalu besar untuk akun kamu.</b>\n\n"
                     f"📦 Ukuran file: <b>{_fmt_size(file_size)}</b>\n"

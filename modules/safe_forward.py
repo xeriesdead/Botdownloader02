@@ -1,605 +1,4 @@
-import asyncio
-import os
-import random
-import shutil
-import subprocess
-import tempfile
-import time
-from pyrogram.errors import (
-    FloodWait,
-    ChannelPrivate,
-    ChannelInvalid,
-    ChatForbidden,
-    ChatIdInvalid,
-    ChatInvalid,
-    UsernameNotOccupied,
-    UsernameInvalid,
-    PeerIdInvalid,
-    UserNotParticipant,
-    MessageIdInvalid,
-    MsgIdInvalid,
-    ChatForwardsRestricted,
-    FileReferenceExpired,
-)
-from pyrogram import raw
-from pyrogram.types import Message
-from telegram import (
-    InputMediaAnimation,
-    InputMediaAudio,
-    InputMediaDocument,
-    InputMediaPhoto,
-    InputMediaVideo,
-)
-from telegram.error import BadRequest, Forbidden
-from config import (
-    MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB,
-    MAX_FILE_SIZE_BYTES_PREMIUM, MAX_FILE_SIZE_MB_PREMIUM,
-)
-from logger import logger
-
-MAX_RETRIES = 2
-FLOOD_LIMIT = 60
-
-# Batas upload ulang via Bot API (file di atas ini tidak bisa di-re-upload oleh bot)
-_BOT_API_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
-
-# Username bot â diset sekali saat startup via set_bot_username()
-_BOT_USERNAME: str = ""
-
-
-def set_bot_username(username: str):
-    global _BOT_USERNAME
-    _BOT_USERNAME = username
-
-
-def _build_caption(original: str) -> str:
-    """Tambahkan watermark bot ke caption asli."""
-    tag = f"@{_BOT_USERNAME}" if _BOT_USERNAME else "Bot Downloader"
-    watermark = f"By ({tag})"
-    if original:
-        return f"{original}\n\n{watermark}"
-    return watermark
-
-_PEER_ERRORS = (
-    ChannelPrivate, ChannelInvalid, ChatForbidden,
-    ChatIdInvalid, ChatInvalid, UserNotParticipant, PeerIdInvalid,
-)
-
-
-# Cache hasil deteksi noforwards per chat agar tidak dipanggil ulang setiap pesan
-_forwards_restricted_cache: dict[str, bool] = {}
-
-# Minimum ukuran file agar progress bar ditampilkan (10 MB)
-_PROGRESS_MIN_BYTES = 10 * 1024 * 1024
-
-# Telegram menerima thumbnail video dalam bentuk JPEG kecil. Gunakan frame
-# setelah pembukaan video agar thumbnail tidak sering berupa frame hitam.
-_THUMBNAIL_MAX_SECONDS = 5.0
-_THUMBNAIL_MAX_BYTES = 200 * 1024
-
-
-# ââ Helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
-def _progress_bar(pct: int, width: int = 10) -> str:
-    filled = round(pct / 100 * width)
-    return "â" * filled + "â" * (width - filled)
-
-
-def _fmt_eta(seconds: float) -> str:
-    """Format detik menjadi teks ETA singkat dalam Bahasa Indonesia."""
-    s = int(seconds)
-    if s < 5:
-        return "sebentar lagi"
-    if s < 60:
-        return f"~{s} detik"
-    if s < 3600:
-        m = round(s / 60)
-        return f"~{m} menit"
-    h = s / 3600
-    return f"~{h:.1f} jam"
-
-
-def _fmt_speed(bps: float) -> str:
-    """Format bytes/detik menjadi string kecepatan yang mudah dibaca."""
-    if bps < 1024:
-        return f"{bps:.0f} B/s"
-    if bps < 1024 * 1024:
-        return f"{bps / 1024:.1f} KB/s"
-    return f"{bps / 1024 / 1024:.1f} MB/s"
-
-
-def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
-    """
-    Buat callback progress Pyrogram (signature: current, total).
-    on_progress: async callable(text: str) â fungsi untuk update pesan status.
-    Debounce: update maks 1x per 3 detik ATAU tiap lompatan 10%.
-    Menampilkan: bar, persentase, ukuran, kecepatan, dan estimasi waktu selesai (ETA).
-    """
-    state = {
-        "last_time": 0.0,
-        "last_pct": -1,
-        "start_time": 0.0,   # waktu byte pertama diterima
-        "started": False,
-    }
-
-    async def _cb(current: int, total: int):
-        if total <= 0:
-            return
-        now = time.monotonic()
-
-        # Catat waktu mulai saat callback pertama kali dipanggil
-        if not state["started"]:
-            state["started"] = True
-            state["start_time"] = now
-
-        pct = int(current * 100 / total)
-        if (
-            pct == state["last_pct"]
-            or (now - state["last_time"] < 3.0 and pct - state["last_pct"] < 10)
-        ):
-            return
-        state["last_time"] = now
-        state["last_pct"] = pct
-
-        # Hitung kecepatan rata-rata dan ETA
-        elapsed = now - state["start_time"]
-        speed_bps = current / elapsed if elapsed > 0.5 else 0.0
-        remaining = total - current
-        eta_str = _fmt_eta(remaining / speed_bps) if speed_bps > 0 else ""
-        speed_str = _fmt_speed(speed_bps) if speed_bps > 0 else ""
-
-        bar = _progress_bar(pct)
-        size_str = _fmt_size(total_size) if total_size else _fmt_size(total)
-
-        # Baris info: ukuran â¢ kecepatan â¢ ETA (tampilkan hanya jika tersedia)
-        info_parts = [f"<b>{_fmt_size(current)}</b> / {size_str}"]
-        if speed_str:
-            info_parts.append(speed_str)
-        if eta_str:
-            info_parts.append(f"â± {eta_str}")
-        info_line = " â¢ ".join(info_parts)
-
-        text = (
-            f"â³ <b>{phase}...</b>\n"
-            f"<code>[{bar}]</code> {pct}%\n"
-            f"{info_line}"
-        )
-        try:
-            # Progress hanya informasi tambahan. Jika Telegram lambat saat
-            # mengedit pesan status, transfer Pyrogram tetap berjalan.
-            await asyncio.wait_for(
-                on_progress(text),
-                timeout=_PROGRESS_CALLBACK_TIMEOUT,
-            )
-        except Exception:
-            pass
-
-    return _cb
-
-_PEER_RESOLVE_TIMEOUT  = 20   # detik â batas waktu resolve peer & get_chat
-_MSG_FETCH_TIMEOUT     = 25   # detik â batas waktu get_messages
-_ACCESS_CHECK_TIMEOUT  = 12   # detik â batas waktu pre-flight cek akses channel
-_DOWNLOAD_TIMEOUT      = 120  # detik â timeout dasar download file kecil
-_DOWNLOAD_STALL_TIMEOUT = 45  # detik tanpa byte baru sebelum transfer dibatalkan
-_UPLOAD_TIMEOUT        = 300  # detik â timeout dasar upload file kecil
-_LARGE_TRANSFER_TIMEOUT_MAX = 2 * 60 * 60  # transfer Premium besar maksimal 2 jam
-_ALBUM_FETCH_TIMEOUT   = 30   # detik â batas waktu mengambil metadata album
-_ALBUM_WRAPPER_TIMEOUT  = 15   # detik â batas jalur get_media_group sebelum raw fallback
-_ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file â dipakai di _send_album_via_bot
-_BOT_COPY_TIMEOUT      = 30   # detik â jalur cepat untuk pesan channel publik
-_PROGRESS_CALLBACK_TIMEOUT = 5  # update status tidak boleh menahan transfer
-_TRANSFER_POLL_INTERVAL = 2  # detik â frekuensi pemeriksaan watchdog transfer
-
-# Timeout PTB untuk operasi upload ke Bot API
-_PTB_WRITE_TIMEOUT   = 90    # detik
-_PTB_READ_TIMEOUT    = 60    # detik
-_PTB_CONNECT_TIMEOUT = 15    # detik
-
-
-def _media_transfer_timeout(file_size: int | None, base_timeout: int) -> int:
-    """Beri waktu proporsional untuk transfer media besar tanpa mengubah file kecil."""
-    if not file_size:
-        return base_timeout
-    size_mb = file_size / (1024 * 1024)
-    return max(
-        base_timeout,
-        min(_LARGE_TRANSFER_TIMEOUT_MAX, int(size_mb * 1.5) + 30),
-    )
-
-
-def _consume_cancelled_task(task: asyncio.Task):
-    """Konsumsi hasil task yang dibatalkan agar tidak menghasilkan warning."""
-    if task.cancelled():
-        return
-    try:
-        task.exception()
-    except BaseException:
-        pass
-
-
-async def _hard_timeout(awaitable, timeout: float, operation: str):
-    """
-    Timeout yang tidak menunggu coroutine Pyrogram selesai dibatalkan.
-
-    Beberapa operasi Pyrogram dapat menahan pembatalan saat koneksi MTProto
-    macet. `asyncio.wait_for()` ikut menunggu proses pembatalan tersebut,
-    sehingga worker terlihat stuck. Dengan `asyncio.wait()`, worker kembali
-    tepat setelah batas waktu dan task yang macet dibersihkan saat selesai.
-    """
-    task = asyncio.ensure_future(awaitable)
-    try:
-        done, _ = await asyncio.wait({task}, timeout=timeout)
-    except BaseException:
-        if not task.done():
-            task.cancel()
-            task.add_done_callback(_consume_cancelled_task)
-        raise
-
-    if task in done:
-        return task.result()
-
-    logger.warning("%s timeout setelah %ss", operation, timeout)
-    task.cancel()
-    task.add_done_callback(_consume_cancelled_task)
-    raise asyncio.TimeoutError(f"{operation} timeout")
-
-
-def _new_download_dir(user_chat_id: int) -> str:
-    """Buat direktori sementara yang bisa dihapus utuh setelah satu job."""
-    os.makedirs("downloads", exist_ok=True)
-    return tempfile.mkdtemp(
-        prefix=f"telegram_{int(user_chat_id)}_",
-        dir="downloads",
-    )
-
-
-async def _notify_progress(on_progress, text: str):
-    """Kirim status fase tanpa membuat download gagal jika Telegram sedang timeout."""
-    if not on_progress:
-        return
-    try:
-        await asyncio.wait_for(
-            on_progress(text),
-            timeout=_PROGRESS_CALLBACK_TIMEOUT,
-        )
-    except Exception:
-        pass
-
-
-async def _run_transfer_with_watchdog(
-    factory,
-    timeout: int,
-    operation: str,
-    progress=None,
-):
-    """
-    Jalankan transfer Pyrogram dengan timeout total dan timeout saat byte tidak
-    bertambah.
-
-    Pyrogram dapat memanggil callback berulang kali dengan posisi byte yang
-    sama ketika sedang retry pada chunk yang gagal. Callback saja tidak cukup
-    sebagai tanda koneksi masih hidup; watchdog hanya di-reset jika posisi
-    transfer benar-benar berubah.
-    """
-    last_progress_at = time.monotonic()
-    last_position = None
-
-    async def _progress(current: int, total: int):
-        nonlocal last_progress_at, last_position
-        if current != last_position:
-            last_position = current
-            last_progress_at = time.monotonic()
-        if progress:
-            try:
-                await progress(current, total)
-            except Exception:
-                pass
-
-    task = asyncio.ensure_future(factory(_progress))
-    started_at = time.monotonic()
-    try:
-        while not task.done():
-            await asyncio.sleep(_TRANSFER_POLL_INTERVAL)
-            now = time.monotonic()
-            if now - last_progress_at >= _DOWNLOAD_STALL_TIMEOUT:
-                logger.warning(
-                    "%s stalled: no byte progress for %ss (position=%s)",
-                    operation,
-                    _DOWNLOAD_STALL_TIMEOUT,
-                    last_position,
-                )
-                task.cancel()
-                task.add_done_callback(_consume_cancelled_task)
-                raise asyncio.TimeoutError(
-                    f"{operation} stalled after {_DOWNLOAD_STALL_TIMEOUT}s"
-                )
-            if now - started_at >= timeout:
-                logger.warning("%s timeout setelah %ss", operation, timeout)
-                task.cancel()
-                task.add_done_callback(_consume_cancelled_task)
-                raise asyncio.TimeoutError(f"{operation} timeout")
-        return task.result()
-    except BaseException:
-        if not task.done():
-            task.cancel()
-            task.add_done_callback(_consume_cancelled_task)
-        raise
-
-
-async def _download_media(
-    client,
-    media,
-    file_name: str,
-    timeout: int,
-    operation: str,
-    progress=None,
-):
-    """Download media via Pyrogram dengan watchdog transfer yang nyata."""
-    downloaded = await _run_transfer_with_watchdog(
-        lambda transfer_progress: client.download_media(
-            media,
-            file_name=file_name,
-            progress=transfer_progress,
-        ),
-        timeout=timeout,
-        operation=operation,
-        progress=progress,
-    )
-    if not downloaded:
-        return downloaded
-
-    # Pyrogram dapat mengembalikan folder tujuan ketika `file_name` berupa
-    # direktori. Telegram Bot API membutuhkan path file aktual, bukan folder.
-    if os.path.isfile(downloaded):
-        return downloaded
-
-    search_root = downloaded if os.path.isdir(downloaded) else file_name
-    if not os.path.isdir(search_root):
-        return downloaded
-
-    candidates = []
-    for root, _, names in os.walk(search_root):
-        for name in names:
-            candidate = os.path.join(root, name)
-            if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
-                candidates.append(candidate)
-
-    if not candidates:
-        return downloaded
-
-    # Satu media biasanya menghasilkan satu file. Jika ada metadata tambahan,
-    # pilih file media terbesar agar folder tetap aman dipakai sebagai target.
-    return max(candidates, key=os.path.getsize)
-
-
-async def copy_public_message(
-    bot, user_chat_id: int, chat, msg_id: int, on_progress=None,
-) -> bool:
-    """Pindahkan pesan publik lewat Bot API tanpa mengunduh media ke Railway."""
-    if not isinstance(chat, str) or not chat.startswith("@"):
-        return False
-
-    await _notify_progress(
-        on_progress, "ð¤ <b>Menyalin pesan dari channel publik...</b>"
-    )
-    try:
-        await asyncio.wait_for(
-            bot.copy_message(
-                chat_id=user_chat_id,
-                from_chat_id=chat,
-                message_id=msg_id,
-                write_timeout=_PTB_WRITE_TIMEOUT,
-                read_timeout=_PTB_READ_TIMEOUT,
-                connect_timeout=_PTB_CONNECT_TIMEOUT,
-            ),
-            timeout=_BOT_COPY_TIMEOUT,
-        )
-        return True
-    except asyncio.TimeoutError:
-        # Jangan langsung mencoba metode kedua setelah timeout: Telegram
-        # mungkin sudah menerima copy request dan retry dapat membuat duplikat.
-        logger.warning("Timeout copy_message(%s, %s)", chat, msg_id)
-        return False
-    except (BadRequest, Forbidden) as exc:
-        logger.info(
-            "copy_message(%s, %s) tidak tersedia: %s",
-            chat, msg_id, exc,
-        )
-    except Exception as exc:
-        logger.warning(
-            "copy_message(%s, %s) gagal: %s",
-            chat, msg_id, exc,
-        )
-
-    # Beberapa pesan/media publik ditolak oleh copyMessage tetapi masih bisa
-    # diteruskan lewat forwardMessage. Ini juga tidak memakai download lokal.
-    await _notify_progress(
-        on_progress, "ð¤ <b>Meneruskan media besar tanpa download ulang...</b>"
-    )
-    try:
-        await asyncio.wait_for(
-            bot.forward_message(
-                chat_id=user_chat_id,
-                from_chat_id=chat,
-                message_id=msg_id,
-                write_timeout=_PTB_WRITE_TIMEOUT,
-                read_timeout=_PTB_READ_TIMEOUT,
-                connect_timeout=_PTB_CONNECT_TIMEOUT,
-            ),
-            timeout=_BOT_COPY_TIMEOUT,
-        )
-        return True
-    except asyncio.TimeoutError:
-        logger.warning("Timeout forward_message(%s, %s)", chat, msg_id)
-    except (BadRequest, Forbidden) as exc:
-        logger.info(
-            "forward_message(%s, %s) tidak tersedia, gunakan fallback: %s",
-            chat, msg_id, exc,
-        )
-    except Exception as exc:
-        logger.warning(
-            "forward_message(%s, %s) gagal, gunakan fallback: %s",
-            chat, msg_id, exc,
-        )
-    return False
-
-
-async def check_channel_access(client, chat) -> tuple[bool, str]:
-    """
-    Pre-flight: cek apakah client bisa mengakses channel/grup.
-    Dipanggil SEBELUM quota dipotong agar user tidak kehilangan quota
-    jika akun belum bergabung ke channel target.
-
-    Return (True, "") jika bisa diakses, (False, pesan_error) jika tidak.
-    """
-    label = f"ID {chat}" if isinstance(chat, int) else str(chat)
-    try:
-        await _hard_timeout(
-            client.get_chat(chat),
-            timeout=_ACCESS_CHECK_TIMEOUT,
-            operation=f"get_chat({chat})",
-        )
-        return True, ""
-    except asyncio.TimeoutError:
-        return False, (
-            "â³ <b>Tidak bisa memeriksa channel (timeout).</b>\n"
-            "Pastikan akun sudah bergabung, lalu coba lagi."
-        )
-    except _PEER_ERRORS:
-        return False, (
-            "ð <b>Akses ditolak.</b>\n\n"
-            f"Akun kamu belum bergabung ke channel <code>{label}</code>.\n"
-            "Silakan join channel tersebut terlebih dahulu, lalu coba lagi."
-        )
-    except (UsernameNotOccupied, UsernameInvalid):
-        return False, f"â Channel <code>{label}</code> tidak ditemukan atau sudah tidak aktif."
-    except Exception as e:
-        logger.warning(f"check_channel_access({chat}): {e}")
-        # Jika cek gagal karena alasan lain (misal network), biarkan lanjut â
-        # error yang lebih spesifik akan muncul saat proses download.
-        return True, ""
-
-
-async def _is_forwards_restricted(client, chat) -> bool:
-    """
-    Cek apakah channel/grup mengaktifkan 'Restrict Saving Content' (noforwards).
-    Hasil di-cache per chat agar efisien saat bulk download.
-    Return True jika forward dibatasi, False jika tidak (atau tidak bisa cek).
-    """
-    cache_key = str(chat)
-    if cache_key in _forwards_restricted_cache:
-        return _forwards_restricted_cache[cache_key]
-    try:
-        chat_obj = await _hard_timeout(
-            client.get_chat(chat),
-            timeout=_PEER_RESOLVE_TIMEOUT,
-            operation=f"get_chat({chat})",
-        )
-        restricted = bool(getattr(chat_obj, "has_protected_content", False))
-        _forwards_restricted_cache[cache_key] = restricted
-        if restricted:
-            logger.info(f"Chat {chat} memiliki noforwards aktif â pakai strategi download+upload")
-        return restricted
-    except asyncio.TimeoutError:
-        logger.warning(f"Timeout get_chat({chat}) saat cek noforwards â anggap tidak restricted")
-        return False
-    except Exception as e:
-        logger.warning(f"Gagal cek has_protected_content untuk {chat}: {e}")
-        return False
-
-
-async def _resolve_source(client, chat) -> tuple[object | None, str | None]:
-    """Resolve source chat. Return a stable numeric chat ID when available."""
-    label = chat if isinstance(chat, str) else f"ID {chat}"
-    try:
-        chat_obj = await _hard_timeout(
-            client.get_chat(chat),
-            timeout=_PEER_RESOLVE_TIMEOUT,
-            operation=f"get_chat({chat})",
-        )
-        # get_messages() with a username can trigger a second username lookup
-        # in Pyrogram. Reuse Telegram's numeric ID to avoid that network path.
-        stable_chat = getattr(chat_obj, "id", None) or chat
-        return stable_chat, None
-    except asyncio.TimeoutError:
-        logger.warning(f"Timeout get_chat({chat})")
-        return None, (
-            f"â Tidak bisa mengakses channel (timeout).\n"
-            "Pastikan akun sudah bergabung ke channel tersebut."
-        )
-    except (UsernameNotOccupied, UsernameInvalid):
-        return None, f"Channel/grup `{label}` tidak ditemukan atau sudah tidak aktif."
-    except _PEER_ERRORS:
-        return None, (
-            f"â Tidak bisa mengakses channel.\n"
-            "Pastikan akun yang login sudah bergabung ke channel/grup tersebut."
-        )
-    except Exception as e:
-        logger.warning(f"get_chat({chat}) error: {e}")
-        return None, f"Gagal mengakses channel: {e}"
-
-
-async def _get_message_via_raw_api(client, chat, msg_id: int):
-    """
-    Ambil satu pesan lewat raw MTProto API.
-
-    Pada beberapa koneksi/channel, wrapper Pyrogram get_messages() dapat
-    berhenti setelah peer berhasil di-resolve. Raw channels.getMessages /
-    messages.getMessages menghindari lookup wrapper tersebut.
-    """
-    peer = await _hard_timeout(
-        client.resolve_peer(chat),
-        timeout=_PEER_RESOLVE_TIMEOUT,
-        operation=f"resolve_peer({chat})",
-    )
-    message_id = raw.types.InputMessageID(id=msg_id)
-
-    if isinstance(peer, raw.types.InputPeerChannel):
-        # channels.getMessages expects InputChannel, not InputPeerChannel.
-        # Both carry the same channel identifiers, but Telegram treats them
-        # as different MTProto constructors.
-        channel = raw.types.InputChannel(
-            channel_id=peer.channel_id,
-            access_hash=peer.access_hash,
-        )
-        result = await _hard_timeout(
-            client.invoke(
-                raw.functions.channels.GetMessages(
-                    channel=channel,
-                    id=[message_id],
-                )
-            ),
-            timeout=_MSG_FETCH_TIMEOUT,
-            operation=f"channels.getMessages({chat}, {msg_id})",
-        )
-    else:
-        result = await _hard_timeout(
-            client.invoke(
-                raw.functions.messages.GetMessages(
-                    id=[message_id],
-                )
-            ),
-            timeout=_MSG_FETCH_TIMEOUT,
-            operation=f"messages.getMessages({chat}, {msg_id})",
-        )
-
-    messages = getattr(result, "messages", None) or []
-    if not messages:
-        return None
-
-    parsed = Message._parse(
-        client,
-        messages[0],
-        getattr(result, "users", None) or [],
-        getattr(result, "chats", None) or [],
-    )
-    if hasattr(parsed, "__await__"):
-        parsed = await parsed
-    return parsed
-
-
-async def _get_message(client, chat, msg_id: int):
-    """Ambil pesan dengan raw API dan fallback wrapper untuk kompatibilitas."""
+er untuk kompatibilitas."""
     try:
         return await _get_message_via_raw_api(client, chat, msg_id)
     except asyncio.TimeoutError:
@@ -622,12 +21,14 @@ async def _get_message(client, chat, msg_id: int):
 
 async def inspect_message_media_size(
     client, chat, msg_id: int,
-) -> tuple[bool, int | None]:
+) -> tuple[bool, int | None, bool]:
     """
     Baca metadata pesan tanpa mengunduh media.
 
-    Return (has_media, file_size). Dipakai sebagai pre-flight agar file yang
-    melewati batas user ditolak sebelum quota dipotong atau masuk antrian.
+    Untuk album, ukuran terbesar dari seluruh media dikembalikan agar batas
+    akun diperiksa sebelum quota dipotong atau proses masuk antrian.
+
+    Return (has_media, file_size, is_album).
     """
     source_chat, source_error = await _resolve_source(client, chat)
     if source_error:
@@ -637,7 +38,50 @@ async def inspect_message_media_size(
     if not message or message.empty:
         raise RuntimeError(f"Pesan `{msg_id}` kosong atau sudah dihapus.")
 
-    return bool(message.media), _get_file_size(message)
+    if message.media_group_id:
+        album_messages = await _hard_timeout(
+            _fetch_album_messages(client, source_chat, msg_id),
+            timeout=_ALBUM_WRAPPER_TIMEOUT + _PEER_RESOLVE_TIMEOUT + _ALBUM_FETCH_TIMEOUT + 8,
+            operation=f"inspect album size({source_chat}, {msg_id})",
+        )
+        sizes = [_get_file_size(item) for item in album_messages]
+        known_sizes = [size for size in sizes if size is not None]
+        return True, max(known_sizes) if known_sizes else None, True
+
+    return bool(message.media), _get_file_size(message), False
+
+
+def _album_size_error(messages, is_premium: bool) -> str | None:
+    """Buat alasan yang jelas sebelum album melewati batas akun."""
+    size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
+    size_label = (
+        f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
+        if is_premium else f"{MAX_FILE_SIZE_MB} MB (Free)"
+    )
+    oversized = [
+        _get_file_size(message)
+        for message in messages
+        if _get_file_size(message) and _get_file_size(message) > size_limit
+    ]
+    if not oversized:
+        return None
+
+    largest = _fmt_size(max(oversized))
+    if not is_premium:
+        return (
+            "❌ <b>Album tidak dapat diproses oleh akun Free.</b>\n\n"
+            f"📦 Media terbesar dalam album: <b>{largest}</b>\n"
+            f"📏 Batas akun Free: <b>{size_label}</b>\n\n"
+            "Bot berjalan normal dan permintaan dihentikan sebelum download "
+            "agar tidak terlihat stuck.\n"
+            "💎 Upgrade ke Premium untuk mengirim file hingga "
+            f"<b>{MAX_FILE_SIZE_MB_PREMIUM} MB</b>."
+        )
+
+    return (
+        f"Album memiliki media terlalu besar ({largest}). "
+        f"Batas maksimal: {size_label}."
+    )
 
 
 def _get_file_size(msg) -> int | None:
@@ -954,20 +398,9 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
     else:
         msgs = messages
     total = len(msgs)
-    size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
-    size_label = (
-        f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
-        if is_premium else f"{MAX_FILE_SIZE_MB} MB"
-    )
-    oversized = [
-        _get_file_size(m) for m in msgs
-        if _get_file_size(m) and _get_file_size(m) > size_limit
-    ]
-    if oversized:
-        return False, (
-            f"Album memiliki media terlalu besar ({_fmt_size(max(oversized))}). "
-            f"Batas maksimal: {size_label}."
-        )
+    size_error = _album_size_error(msgs, is_premium)
+    if size_error:
+        return False, size_error
     paths: list[str]    = []
     download_dirs: list[str] = []
     thumbnail_paths: list[str] = []
@@ -1440,20 +873,9 @@ async def _send_album_individually(
         return False, "Album kosong atau tidak ditemukan."
 
     total = len(msgs)
-    size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
-    size_label = (
-        f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
-        if is_premium else f"{MAX_FILE_SIZE_MB} MB"
-    )
-    oversized = [
-        _get_file_size(m) for m in msgs
-        if _get_file_size(m) and _get_file_size(m) > size_limit
-    ]
-    if oversized:
-        return False, (
-            f"Album memiliki media terlalu besar ({_fmt_size(max(oversized))}). "
-            f"Batas maksimal: {size_label}."
-        )
+    size_error = _album_size_error(msgs, is_premium)
+    if size_error:
+        return False, size_error
 
     # Download semua file terlebih dahulu
     paths: list[str] = []
@@ -1782,6 +1204,9 @@ class SafeForward:
                         "Album metadata error for %s/%s", source_chat, msg_id
                     )
                     return False, f"Gagal mengambil album: {e}"
+                size_error = _album_size_error(album_messages, is_premium)
+                if size_error:
+                    return False, size_error
                 is_restricted = any(
                     bool(getattr(message, "has_protected_content", False))
                     for message in album_messages
