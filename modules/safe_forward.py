@@ -1462,6 +1462,14 @@ async def _send_album_individually(
         file_size  = _get_file_size(m) or 0
         dl_timeout = max(60, 30 + (file_size // (10 * 1024 * 1024)) * 30)
         dl_cb = None
+        if on_progress:
+            # Callback Pyrogram untuk video besar baru muncul setelah byte
+            # pertama diterima. Status awal mencegah fase persiapan terlihat
+            # macet selama transfer belum mengirim callback.
+            await _notify_progress(
+                on_progress,
+                f"<b>Mengunduh album...</b> ({i + 1}/{total})",
+            )
         if on_progress and file_size >= _PROGRESS_MIN_BYTES:
             dl_cb = _make_pyrogram_progress(
                 on_progress,
