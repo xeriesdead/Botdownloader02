@@ -942,7 +942,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
     on_progress: async callable(text: str) untuk update status (opsional).
     """
     if messages is None:
-        msgs = await _fetch_album_messages(client, chat, msg_id)
+        msgs = await _fetch_album_messages(client, chat, msg_id, on_progress=on_progress)
     else:
         msgs = messages
     total = len(msgs)
@@ -1424,7 +1424,7 @@ async def _send_album_individually(
         msgs = messages
     else:
         try:
-            msgs = await _fetch_album_messages(client, chat, msg_id)
+            msgs = await _fetch_album_messages(client, chat, msg_id, on_progress=on_progress)
         except Exception as e:
             return False, f"Gagal mengambil album: {e}"
 
@@ -1547,8 +1547,8 @@ async def _send_album_individually(
 _ALBUM_MESSAGE_WINDOW = 10
 
 
-async def _fetch_album_messages(client, chat, msg_id: int):
-    """Ambil album secara sequential agar session Pyrogram tidak deadlock."""
+async def _fetch_album_messages(client, chat, msg_id: int, on_progress=None):
+    """Ambil album secara sequential dan laporkan progres pencarian metadata.""
     peer = await _hard_timeout(
         client.resolve_peer(chat),
         timeout=_PEER_RESOLVE_TIMEOUT,
@@ -1586,6 +1586,12 @@ async def _fetch_album_messages(client, chat, msg_id: int):
         return parsed if parsed and not getattr(parsed, "empty", False) else None
 
     target = await _fetch_one(msg_id, min(15, _ALBUM_FETCH_TIMEOUT))
+    probed = 1
+    if on_progress:
+        await _notify_progress(
+            on_progress,
+            f"📥 <b>Mengambil album...</b> (memeriksa pesan {probed})",
+        )
     if target is None:
         raise RuntimeError(f"Pesan album {msg_id} tidak ditemukan.")
 
@@ -1604,6 +1610,12 @@ async def _fetch_album_messages(client, chat, msg_id: int):
             try:
                 candidate = await _fetch_one(candidate_id, 5)
             except (asyncio.TimeoutError, MessageIdInvalid, MsgIdInvalid, Exception) as e:
+                probed += 1
+                if on_progress:
+                    await _notify_progress(
+                        on_progress,
+                        f"📥 <b>Mengambil album...</b> (memeriksa pesan {probed})",
+                    )
                 logger.debug(
                     "Album neighbor %s/%s berhenti: %s",
                     chat,
@@ -1611,6 +1623,12 @@ async def _fetch_album_messages(client, chat, msg_id: int):
                     e,
                 )
                 break
+            probed += 1
+            if on_progress:
+                await _notify_progress(
+                    on_progress,
+                    f"📥 <b>Mengambil album...</b> (memeriksa pesan {probed})",
+                )
             if not candidate or getattr(candidate, "media_group_id", None) != group_id:
                 break
             messages.append(candidate)
@@ -1710,7 +1728,9 @@ class SafeForward:
                 await _notify_progress(on_progress, "ð¥ <b>Mengambil album...</b>")
                 try:
                     album_messages = await _hard_timeout(
-                        _fetch_album_messages(client, source_chat, msg_id),
+                        _fetch_album_messages(
+                            client, source_chat, msg_id, on_progress=on_progress
+                        ),
                         timeout=_ALBUM_FETCH_TIMEOUT + 8,
                         operation=f"fetch album({source_chat}, {msg_id})",
                     )
