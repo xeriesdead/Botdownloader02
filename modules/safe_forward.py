@@ -1548,13 +1548,34 @@ _ALBUM_MESSAGE_WINDOW = 10
 
 
 async def _fetch_album_messages(client, chat, msg_id: int):
-    """Ambil anggota album dengan request raw yang dibatasi per pesan."""
+    """Ambil album dengan API native yang dibatasi, lalu fallback raw."""
+    try:
+        native_messages = await _hard_timeout(
+            client.get_media_group(chat, msg_id),
+            timeout=min(20, _ALBUM_FETCH_TIMEOUT),
+            operation=f"get_media_group({chat}, {msg_id})",
+        )
+        if native_messages:
+            return sorted(native_messages, key=lambda message: message.id)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Native get_media_group timeout for %s/%s; using raw fallback",
+            chat,
+            msg_id,
+        )
+    except Exception as e:
+        logger.warning(
+            "Native get_media_group failed for %s/%s; using raw fallback: %s",
+            chat,
+            msg_id,
+            e,
+        )
+
     peer = await _hard_timeout(
         client.resolve_peer(chat),
         timeout=_PEER_RESOLVE_TIMEOUT,
-        operation=f"resolve_peer({chat}) for album",
+        operation=f"resolve_peer({chat}) for album fallback",
     )
-
     ids = [
         msg_id + offset
         for offset in range(
@@ -1731,7 +1752,7 @@ class SafeForward:
                 try:
                     album_messages = await _hard_timeout(
                         _fetch_album_messages(client, source_chat, msg_id),
-                        timeout=_ALBUM_FETCH_TIMEOUT + 8,
+                        timeout=(_ALBUM_FETCH_TIMEOUT * 2) + 12,
                         operation=f"fetch album({source_chat}, {msg_id})",
                     )
                 except asyncio.TimeoutError:
