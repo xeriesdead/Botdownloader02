@@ -1548,49 +1548,77 @@ _ALBUM_MESSAGE_WINDOW = 10
 
 
 async def _fetch_album_messages(client, chat, msg_id: int):
-    """Ambil anggota album lewat raw MTProto, tanpa wrapper get_media_group."""
+    """Ambil anggota album dengan request raw yang dibatasi per pesan."""
     peer = await _hard_timeout(
         client.resolve_peer(chat),
         timeout=_PEER_RESOLVE_TIMEOUT,
         operation=f"resolve_peer({chat}) for album",
     )
+
     ids = [
         msg_id + offset
-        for offset in range(-_ALBUM_MESSAGE_WINDOW, _ALBUM_MESSAGE_WINDOW + 1)
+        for offset in range(
+            -_ALBUM_MESSAGE_WINDOW,
+            _ALBUM_MESSAGE_WINDOW + 1,
+        )
         if msg_id + offset > 0
     ]
-    raw_ids = [raw.types.InputMessageID(id=message_id) for message_id in ids]
-    if isinstance(peer, raw.types.InputPeerChannel):
-        result = await _hard_timeout(
-            client.invoke(
-                raw.functions.channels.GetMessages(channel=peer, id=raw_ids)
-            ),
-            timeout=_ALBUM_FETCH_TIMEOUT,
-            operation=f"channels.GetMessages album({chat}, {msg_id})",
-        )
-    else:
-        result = await _hard_timeout(
-            client.invoke(raw.functions.messages.GetMessages(id=raw_ids)),
-            timeout=_ALBUM_FETCH_TIMEOUT,
-            operation=f"messages.GetMessages album({chat}, {msg_id})",
-        )
+    semaphore = asyncio.Semaphore(5)
+    request_timeout = min(8, _ALBUM_FETCH_TIMEOUT)
+
+    async def _fetch_one(message_id: int):
+        async with semaphore:
+            message_input = raw.types.InputMessageID(id=message_id)
+            if isinstance(peer, raw.types.InputPeerChannel):
+                request = raw.functions.channels.GetMessages(
+                    channel=peer,
+                    id=[message_input],
+                )
+            else:
+                request = raw.functions.messages.GetMessages(
+                    id=[message_input],
+                )
+            result = await _hard_timeout(
+                client.invoke(request),
+                timeout=request_timeout,
+                operation=f"get album message({chat}, {message_id})",
+            )
+            raw_messages = getattr(result, "messages", None) or []
+            if not raw_messages:
+                return None
+            return (
+                raw_messages[0],
+                getattr(result, "users", None) or [],
+                getattr(result, "chats", None) or [],
+            )
+
+    fetched = await _hard_timeout(
+        asyncio.gather(
+            *(_fetch_one(message_id) for message_id in ids),
+            return_exceptions=True,
+        ),
+        timeout=_ALBUM_FETCH_TIMEOUT + 3,
+        operation=f"fetch album messages({chat}, {msg_id})",
+    )
 
     parsed_messages = []
-    for raw_message in getattr(result, "messages", None) or []:
-        parsed = Message._parse(
-            client,
-            raw_message,
-            getattr(result, "users", None) or [],
-            getattr(result, "chats", None) or [],
-        )
+    for item in fetched:
+        if item is None or isinstance(item, BaseException):
+            if isinstance(item, Exception):
+                logger.debug("Album neighbor fetch skipped: %s", item)
+            continue
+        raw_message, users, chats = item
+        parsed = Message._parse(client, raw_message, users, chats)
         if hasattr(parsed, "__await__"):
             parsed = await parsed
         if parsed and not getattr(parsed, "empty", False):
             parsed_messages.append(parsed)
 
     target = next(
-        (message for message in parsed_messages
-         if getattr(message, "id", None) == msg_id),
+        (
+            message for message in parsed_messages
+            if getattr(message, "id", None) == msg_id
+        ),
         None,
     )
     if target is None:
@@ -1601,8 +1629,10 @@ async def _fetch_album_messages(client, chat, msg_id: int):
         return [target]
 
     album = sorted(
-        (message for message in parsed_messages
-         if getattr(message, "media_group_id", None) == group_id),
+        (
+            message for message in parsed_messages
+            if getattr(message, "media_group_id", None) == group_id
+        ),
         key=lambda message: message.id,
     )
     return album or [target]
@@ -1698,9 +1728,25 @@ class SafeForward:
         for attempt in range(MAX_RETRIES + 1):
             try:
                 await _notify_progress(on_progress, "ð¥ <b>Mengambil album...</b>")
-                album_messages = await _fetch_album_messages(
-                    client, source_chat, msg_id
-                )
+                try:
+                    album_messages = await _hard_timeout(
+                        _fetch_album_messages(client, source_chat, msg_id),
+                        timeout=_ALBUM_FETCH_TIMEOUT + 8,
+                        operation=f"fetch album({source_chat}, {msg_id})",
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Album metadata timeout for %s/%s", source_chat, msg_id
+                    )
+                    return False, (
+                        "Timeout saat mengambil album. "
+                        "Coba lagi beberapa saat kemudian."
+                    )
+                except Exception as e:
+                    logger.exception(
+                        "Album metadata error for %s/%s", source_chat, msg_id
+                    )
+                    return False, f"Gagal mengambil album: {e}"
                 is_restricted = any(
                     bool(getattr(message, "has_protected_content", False))
                     for message in album_messages
