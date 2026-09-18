@@ -46,6 +46,8 @@ _user_locks:  dict[int, asyncio.Lock] = {}
 _bulk_cancel: dict[int, bool]         = {}
 # Simpan data retry per user: uid → (channel, [failed_ids])
 _retry_store: dict[int, tuple[str, list[int]]] = {}
+_album_choice_waiters: dict[str, tuple[int, asyncio.Future]] = {}
+_ALBUM_CHOICE_TIMEOUT = 120
 
 RATE_LIMIT = 2.0
 BULK_MAX   = 50
@@ -519,224 +521,270 @@ def setup(app):
                     parse_mode=ParseMode.HTML,
                 )
 
-            if not QuotaService.use_quota(uid):
-                return await update.message.reply_text(
-                    "❌ <b>Quota habis!</b>\n\n"
-                    "• Gunakan /referral untuk bonus quota gratis.\n"
-                    "• Atau /pay untuk upgrade ke Premium (quota Unlimited).",
-                    parse_mode=ParseMode.HTML,
+            async def queue_single_request(single_only: bool):
+                if not QuotaService.use_quota(uid):
+                    return await update.message.reply_text(
+                        "❌ <b>Quota habis!</b>\n\n"
+                        "• Gunakan /referral untuk bonus quota gratis.\n"
+                        "• Atau /pay untuk upgrade ke Premium (quota Unlimited).",
+                        parse_mode=ParseMode.HTML,
+                    )
+
+                lock    = _get_lock(uid)
+
+                if not queue_manager.can_add(is_prem):
+                    QuotaService.add_quota(uid, 1)
+                    return await update.message.reply_text("❌ Server sedang sibuk, coba lagi nanti.")
+
+                q          = QuotaService.get_quota(uid)
+                quota_disp = "∞ Unlimited" if q.get("unlimited") else str(q["total"])
+
+                # Kirim pesan sementara dulu, lalu update dengan posisi nyata setelah job masuk
+                pmsg    = await update.message.reply_text("⏳ Memproses...", parse_mode=ParseMode.HTML)
+                pmsg_id = pmsg.message_id
+
+                async def _edit_s(text: str, html: bool = False):
+                    try:
+                        await asyncio.wait_for(
+                            bot.edit_message_text(
+                                chat_id=chat_id,
+                                message_id=pmsg_id,
+                                text=text,
+                                parse_mode=ParseMode.HTML if html else None,
+                                write_timeout=10,
+                                read_timeout=10,
+                                connect_timeout=10,
+                            ),
+                            timeout=15,
+                        )
+                    except Exception as exc:
+                        logger.debug("Gagal update status message %s: %s", pmsg_id, exc)
+
+                last_progress = [time.monotonic()]
+                single_job_timeout = (
+                    _SINGLE_JOB_TIMEOUT_PREMIUM if is_prem else _SINGLE_JOB_TIMEOUT
                 )
 
-            lock    = _get_lock(uid)
+                async def single_job():
+                    uc = None
+                    async def _heartbeat():
+                        try:
+                            while True:
+                                await asyncio.sleep(20)
+                                if time.monotonic() - last_progress[0] >= 20:
+                                    await _edit_s(
+                                        "⏳ <b>Masih memproses download...</b>\n"
+                                        "<i>Koneksi Telegram sedang lambat, bot belum berhenti.</i>",
+                                        html=True,
+                                    )
+                                    last_progress[0] = time.monotonic()
+                        except asyncio.CancelledError:
+                            raise
 
-            if not queue_manager.can_add(is_prem):
-                QuotaService.add_quota(uid, 1)
-                return await update.message.reply_text("❌ Server sedang sibuk, coba lagi nanti.")
-
-            q          = QuotaService.get_quota(uid)
-            quota_disp = "∞ Unlimited" if q.get("unlimited") else str(q["total"])
-
-            # Kirim pesan sementara dulu, lalu update dengan posisi nyata setelah job masuk
-            pmsg    = await update.message.reply_text("⏳ Memproses...", parse_mode=ParseMode.HTML)
-            pmsg_id = pmsg.message_id
-
-            async def _edit_s(text: str, html: bool = False):
-                try:
-                    await asyncio.wait_for(
-                        bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=pmsg_id,
-                            text=text,
-                            parse_mode=ParseMode.HTML if html else None,
-                            write_timeout=10,
-                            read_timeout=10,
-                            connect_timeout=10,
-                        ),
-                        timeout=15,
-                    )
-                except Exception as exc:
-                    logger.debug("Gagal update status message %s: %s", pmsg_id, exc)
-
-            last_progress = [time.monotonic()]
-            single_job_timeout = (
-                _SINGLE_JOB_TIMEOUT_PREMIUM if is_prem else _SINGLE_JOB_TIMEOUT
-            )
-
-            async def single_job():
-                uc = None
-                async def _heartbeat():
+                    heartbeat = asyncio.create_task(_heartbeat())
                     try:
-                        while True:
-                            await asyncio.sleep(20)
-                            if time.monotonic() - last_progress[0] >= 20:
+                        # Tampilkan "Memulai" sebelum tunggu lock — bisa ada job lain yang sedang pegang lock
+                        await _edit_s(
+                            f"🔄 <b>Memulai download...</b>\n📦 Sisa quota: <b>{quota_disp}</b>",
+                            html=True,
+                        )
+
+                        async def _progress(text: str):
+                            last_progress[0] = time.monotonic()
+                            await _edit_s(text, html=True)
+
+                        lock_acquired = False
+                        try:
+                            await asyncio.wait_for(lock.acquire(), timeout=_LOCK_WAIT_TIMEOUT)
+                            lock_acquired = True
+                        except asyncio.TimeoutError:
+                            QuotaService.add_quota(uid, 1)
+                            await _edit_s(
+                                "⏳ Masih ada proses download lain yang berjalan.\n"
+                                "Quota dikembalikan. Coba lagi setelah proses sebelumnya selesai."
+                            )
+                            return
+
+                        try:
+                            public_copy_failed = False
+                            if is_public_chat(chat):
+                                copied = await copy_public_message(
+                                    bot, chat_id, chat, msg_id, on_progress=_progress
+                                )
+                                if copied:
+                                    activity_log(uid, "download", f"{chat}/{msg_id}")
+                                    q_after = QuotaService.get_quota(uid)
+                                    qd = "∞ Unlimited" if q_after.get("unlimited") else str(q_after["total"])
+                                    await _edit_s(
+                                        f"✅ Terkirim!\n📦 Sisa quota: <b>{qd}</b>",
+                                        html=True,
+                                    )
+                                    await _quota_warn(bot, chat_id, uid)
+                                    return
+                                public_copy_failed = True
                                 await _edit_s(
-                                    "⏳ <b>Masih memproses download...</b>\n"
-                                    "<i>Koneksi Telegram sedang lambat, bot belum berhenti.</i>",
+                                    "🔄 Jalur langsung tidak tersedia, mencoba metode cadangan...",
                                     html=True,
                                 )
-                                last_progress[0] = time.monotonic()
-                    except asyncio.CancelledError:
-                        raise
 
-                heartbeat = asyncio.create_task(_heartbeat())
-                try:
-                    # Tampilkan "Memulai" sebelum tunggu lock — bisa ada job lain yang sedang pegang lock
-                    await _edit_s(
-                        f"🔄 <b>Memulai download...</b>\n📦 Sisa quota: <b>{quota_disp}</b>",
-                        html=True,
-                    )
-
-                    async def _progress(text: str):
-                        last_progress[0] = time.monotonic()
-                        await _edit_s(text, html=True)
-
-                    lock_acquired = False
-                    try:
-                        await asyncio.wait_for(lock.acquire(), timeout=_LOCK_WAIT_TIMEOUT)
-                        lock_acquired = True
-                    except asyncio.TimeoutError:
-                        QuotaService.add_quota(uid, 1)
-                        await _edit_s(
-                            "⏳ Masih ada proses download lain yang berjalan.\n"
-                            "Quota dikembalikan. Coba lagi setelah proses sebelumnya selesai."
-                        )
-                        return
-
-                    try:
-                        public_copy_failed = False
-                        if is_public_chat(chat):
-                            copied = await copy_public_message(
-                                bot, chat_id, chat, msg_id, on_progress=_progress
+                            # Jika Bot API tidak dapat membaca channel publik, jangan
+                            # memulai Pyrogram bot session yang bisa macet di start().
+                            # Gunakan session user yang sudah login sebagai fallback.
+                            session_lookup = (
+                                session_manager.get(uid)
+                                if public_copy_failed
+                                else session_manager.get_for_chat(uid, chat)
                             )
-                            if copied:
+                            uc = await _hard_timeout(
+                                session_lookup,
+                                timeout=_SESSION_LOOKUP_TIMEOUT,
+                                operation=f"session lookup user {uid}",
+                            )
+                            # Baru di sini proses benar-benar berjalan
+                            await _edit_s(
+                                f"⏳ <b>Sedang mengunduh...</b>\n📦 Sisa quota: <b>{quota_disp}</b>",
+                                html=True,
+                            )
+                            if not uc:
+                                QuotaService.add_quota(uid, 1)
+                                message = (
+                                    "❌ Bot API tidak bisa membaca channel publik ini.\n"
+                                    "Gunakan /login agar bot dapat mencoba session Telegram kamu."
+                                    if is_public_chat(chat)
+                                    else "❌ Session tidak valid. Silakan /login ulang."
+                                )
+                                await _edit_s(message)
+                                return
+                            try:
+                                ok, reason = await _hard_timeout(
+                                    SafeForward.run(
+                                        uc, bot, chat_id, chat, msg_id,
+                                        on_progress=_progress,
+                                        is_premium=is_prem,
+                                        skip_public_copy=public_copy_failed,
+                                        single_only=single_only,
+                                    ),
+                                    timeout=single_job_timeout,
+                                    operation=f"forward message {msg_id}",
+                                )
+                            except asyncio.TimeoutError:
+                                QuotaService.add_quota(uid, 1)
+                                await _edit_s(
+                                    "⏱️ Download timeout setelah beberapa menit.\n"
+                                    "Quota dikembalikan. Coba lagi dengan link yang sama."
+                                )
+                                return
+                            if not ok:
+                                QuotaService.add_quota(uid, 1)
+                                await _edit_s(f"❌ Gagal: {reason}")
+                            else:
                                 activity_log(uid, "download", f"{chat}/{msg_id}")
-                                q_after = QuotaService.get_quota(uid)
-                                qd = "∞ Unlimited" if q_after.get("unlimited") else str(q_after["total"])
+                                q_after    = QuotaService.get_quota(uid)
+                                qd         = "∞ Unlimited" if q_after.get("unlimited") else str(q_after["total"])
                                 await _edit_s(
                                     f"✅ Terkirim!\n📦 Sisa quota: <b>{qd}</b>",
                                     html=True,
                                 )
                                 await _quota_warn(bot, chat_id, uid)
-                                return
-                            public_copy_failed = True
-                            await _edit_s(
-                                "🔄 Jalur langsung tidak tersedia, mencoba metode cadangan...",
-                                html=True,
-                            )
-
-                        # Jika Bot API tidak dapat membaca channel publik, jangan
-                        # memulai Pyrogram bot session yang bisa macet di start().
-                        # Gunakan session user yang sudah login sebagai fallback.
-                        session_lookup = (
-                            session_manager.get(uid)
-                            if public_copy_failed
-                            else session_manager.get_for_chat(uid, chat)
-                        )
-                        uc = await _hard_timeout(
-                            session_lookup,
-                            timeout=_SESSION_LOOKUP_TIMEOUT,
-                            operation=f"session lookup user {uid}",
-                        )
-                        # Baru di sini proses benar-benar berjalan
-                        await _edit_s(
-                            f"⏳ <b>Sedang mengunduh...</b>\n📦 Sisa quota: <b>{quota_disp}</b>",
-                            html=True,
-                        )
-                        if not uc:
-                            QuotaService.add_quota(uid, 1)
-                            message = (
-                                "❌ Bot API tidak bisa membaca channel publik ini.\n"
-                                "Gunakan /login agar bot dapat mencoba session Telegram kamu."
-                                if is_public_chat(chat)
-                                else "❌ Session tidak valid. Silakan /login ulang."
-                            )
-                            await _edit_s(message)
-                            return
+                        finally:
+                            if lock_acquired:
+                                lock.release()
+                    except asyncio.CancelledError:
+                        # Job dibatalkan oleh queue (timeout global) — beri tahu user
+                        QuotaService.add_quota(uid, 1)
                         try:
-                            ok, reason = await _hard_timeout(
-                                SafeForward.run(
-                                    uc, bot, chat_id, chat, msg_id,
-                                    on_progress=_progress,
-                                    is_premium=is_prem,
-                                    skip_public_copy=public_copy_failed,
-                                    single_only=single_only,
-                                ),
-                                timeout=single_job_timeout,
-                                operation=f"forward message {msg_id}",
-                            )
-                        except asyncio.TimeoutError:
-                            QuotaService.add_quota(uid, 1)
                             await _edit_s(
-                                "⏱️ Download timeout setelah beberapa menit.\n"
-                                "Quota dikembalikan. Coba lagi dengan link yang sama."
-                            )
-                            return
-                        if not ok:
-                            QuotaService.add_quota(uid, 1)
-                            await _edit_s(f"❌ Gagal: {reason}")
-                        else:
-                            activity_log(uid, "download", f"{chat}/{msg_id}")
-                            q_after    = QuotaService.get_quota(uid)
-                            qd         = "∞ Unlimited" if q_after.get("unlimited") else str(q_after["total"])
-                            await _edit_s(
-                                f"✅ Terkirim!\n📦 Sisa quota: <b>{qd}</b>",
+                                "❌ <b>Timeout:</b> Proses terlalu lama dan dibatalkan.\n"
+                                "Coba lagi — jika terus gagal, file mungkin terlalu besar.",
                                 html=True,
                             )
-                            await _quota_warn(bot, chat_id, uid)
+                        except Exception:
+                            pass
+                        raise  # re-raise agar queue worker tahu job selesai
+                    except Exception as e:
+                        logger.error(f"get single job error uid={uid}: {e}", exc_info=True)
+                        QuotaService.add_quota(uid, 1)
+                        await _edit_s(f"❌ Terjadi kesalahan tak terduga: {e}")
                     finally:
-                        if lock_acquired:
-                            lock.release()
-                except asyncio.CancelledError:
-                    # Job dibatalkan oleh queue (timeout global) — beri tahu user
+                        heartbeat.cancel()
+                        await asyncio.gather(heartbeat, return_exceptions=True)
+                        # User session menyimpan dispatcher dan koneksi Telegram.
+                        # Lepaskan setelah job agar session dari banyak user tidak
+                        # menumpuk dan memicu OOM di container Railway.
+                        if uc is not None:
+                            await session_manager.close(uid)
+
+                pos = queue_manager.add_job(
+                    single_job, is_prem, uid, timeout=single_job_timeout
+                )
+                if pos == 0:
+                    # Race condition: antrian penuh setelah can_add lolos
                     QuotaService.add_quota(uid, 1)
+                    await _edit_s("❌ Server sedang sibuk, coba lagi nanti.")
+                    return
+
+                if pos > 1:
+                    await _edit_s(
+                        f"📋 <b>Masuk antrian!</b>\n"
+                        f"Posisi kamu: <b>ke-{pos}</b>\n"
+                        f"⏳ Menunggu download sebelumnya selesai...\n\n"
+                        f"📦 Sisa quota: <b>{quota_disp}</b>",
+                        html=True,
+                    )
+                else:
+                    await _edit_s(
+                        f"📋 <b>Masuk antrian!</b>\n"
+                        f"Posisi kamu: <b>ke-1</b> (giliran berikutnya)\n"
+                        f"📦 Sisa quota: <b>{quota_disp}</b>",
+                        html=True,
+                    )
+                return
+
+
+            async def _start_album_choice():
+                token = f"{uid}_{update.message.message_id}"
+                choice_future = asyncio.get_running_loop().create_future()
+                _album_choice_waiters[token] = (uid, choice_future)
+                try:
+                    choice_message = await update.message.reply_text(
+                        "📚 <b>Album terdeteksi</b>\nPilih format pengiriman:",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("📚 Kirim sebagai album", callback_data=f"album_choice:{token}:album"),
+                            InlineKeyboardButton("📄 Kirim satuan", callback_data=f"album_choice:{token}:single"),
+                        ]]),
+                    )
+                except Exception as exc:
+                    _album_choice_waiters.pop(token, None)
+                    logger.warning("Gagal menampilkan pilihan album uid=%s: %s", uid, exc)
+                    return
+
+                try:
+                    selected = await asyncio.wait_for(
+                        choice_future, timeout=_ALBUM_CHOICE_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
                     try:
-                        await _edit_s(
-                            "❌ <b>Timeout:</b> Proses terlalu lama dan dibatalkan.\n"
-                            "Coba lagi — jika terus gagal, file mungkin terlalu besar.",
-                            html=True,
+                        await choice_message.edit_text(
+                            "⌛ Pilihan album kedaluwarsa. Silakan kirim ulang link."
                         )
                     except Exception:
                         pass
-                    raise  # re-raise agar queue worker tahu job selesai
-                except Exception as e:
-                    logger.error(f"get single job error uid={uid}: {e}", exc_info=True)
-                    QuotaService.add_quota(uid, 1)
-                    await _edit_s(f"❌ Terjadi kesalahan tak terduga: {e}")
+                    return
                 finally:
-                    heartbeat.cancel()
-                    await asyncio.gather(heartbeat, return_exceptions=True)
-                    # User session menyimpan dispatcher dan koneksi Telegram.
-                    # Lepaskan setelah job agar session dari banyak user tidak
-                    # menumpuk dan memicu OOM di container Railway.
-                    if uc is not None:
-                        await session_manager.close(uid)
+                    _album_choice_waiters.pop(token, None)
 
-            pos = queue_manager.add_job(
-                single_job, is_prem, uid, timeout=single_job_timeout
-            )
-            if pos == 0:
-                # Race condition: antrian penuh setelah can_add lolos
-                QuotaService.add_quota(uid, 1)
-                await _edit_s("❌ Server sedang sibuk, coba lagi nanti.")
+                try:
+                    await choice_message.edit_text("✅ Pilihan diterima. Memproses...")
+                except Exception:
+                    pass
+                await queue_single_request(selected == "single")
+
+            if is_album:
+                asyncio.create_task(_start_album_choice())
                 return
-
-            if pos > 1:
-                await _edit_s(
-                    f"📋 <b>Masuk antrian!</b>\n"
-                    f"Posisi kamu: <b>ke-{pos}</b>\n"
-                    f"⏳ Menunggu download sebelumnya selesai...\n\n"
-                    f"📦 Sisa quota: <b>{quota_disp}</b>",
-                    html=True,
-                )
-            else:
-                await _edit_s(
-                    f"📋 <b>Masuk antrian!</b>\n"
-                    f"Posisi kamu: <b>ke-1</b> (giliran berikutnya)\n"
-                    f"📦 Sisa quota: <b>{quota_disp}</b>",
-                    html=True,
-                )
+            await queue_single_request(single_only)
             return
-
         # ── Dua link → mode bulk ──────────────────────────────────────────
         if len(args) == 2:
             chat_a, msg_a = parse_telegram_link(args[0])
@@ -1081,6 +1129,35 @@ def setup(app):
         # ── Lebih dari 2 argumen ──────────────────────────────────────────
         await update.message.reply_text(_HELP_TEXT, parse_mode=ParseMode.HTML)
 
+    # ── Callback: pilihan format album ───────────────────────────────────
+    async def album_choice_handler(update, context):
+        query = update.callback_query
+        data = query.data or ""
+        if not data.startswith("album_choice:"):
+            return
+
+        try:
+            _, token, mode = data.split(":", 2)
+        except ValueError:
+            await query.answer("❌ Pilihan tidak valid.", show_alert=True)
+            return
+
+        pending = _album_choice_waiters.get(token)
+        if not pending:
+            await query.answer("⌛ Pilihan ini sudah kedaluwarsa.", show_alert=True)
+            return
+
+        owner_uid, choice_future = pending
+        if query.from_user.id != owner_uid:
+            await query.answer("❌ Tombol ini bukan milikmu.", show_alert=True)
+            return
+        if mode not in {"album", "single"} or choice_future.done():
+            await query.answer("⌛ Pilihan ini sudah diproses.", show_alert=True)
+            return
+
+        choice_future.set_result(mode)
+        await query.answer("Pilihan diterima.")
+
     # ── Callback: tombol Retry Gagal ─────────────────────────────────────
     async def retry_handler(update, context):
         query = update.callback_query
@@ -1274,4 +1351,5 @@ def setup(app):
     app.add_handler(CommandHandler("get",            get_cmd))
     app.add_handler(CommandHandler("single",         get_cmd))   # alias
     app.add_handler(CommandHandler("bulk",           get_cmd))   # alias
+    app.add_handler(CallbackQueryHandler(album_choice_handler, pattern=r"^album_choice:[^:]+:(?:album|single)$"))
     app.add_handler(CallbackQueryHandler(retry_handler, pattern=r"^retry:\d+$"))
