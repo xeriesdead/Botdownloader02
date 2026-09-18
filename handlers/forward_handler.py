@@ -412,10 +412,10 @@ def setup(app):
                 return await update.message.reply_text(
                     _LINK_INVALID_TEXT, parse_mode=ParseMode.HTML
                 )
-            # Telegram menambahkan ?single pada link satu item dari sebuah
-            # album. Jangan otomatis mengambil seluruh media group untuk link
-            # yang secara eksplisit meminta satu pesan.
-            single_only = is_single_message_link(args[0])
+            # Telegram dapat menambahkan ?single saat link menunjuk salah satu
+            # item album. Untuk /get, media_group_id tetap menjadi sumber kebenaran
+            # agar seluruh album dikirim, bukan hanya item yang ditautkan.
+            single_only = False
 
             if _requires_user_login(chat) and not _check_logged_in(uid):
                 return await update.message.reply_text(
