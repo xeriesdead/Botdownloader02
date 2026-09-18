@@ -598,51 +598,51 @@ async def _get_message_via_raw_api(client, chat, msg_id: int):
 
 
 async def _get_message(client, chat, msg_id: int):
-    """Ambil pesan dengan raw API dan fallback wrapper untuk kompatibilitas."""
+    """Ambil pesan dengan wrapper Pyrogram lalu fallback ke raw API."""
     try:
-        raw_message = await _get_message_via_raw_api(client, chat, msg_id)
-        if raw_message is not None:
-            return raw_message
-        logger.warning(
-            "Raw get message mengembalikan pesan kosong untuk %s/%s, "
-            "coba wrapper Pyrogram",
-            chat, msg_id,
-        )
-        return await _hard_timeout(
+        message = await _hard_timeout(
             client.get_messages(chat, msg_id),
             timeout=_MSG_FETCH_TIMEOUT,
             operation=f"get_messages({chat}, {msg_id})",
         )
+        if message is not None:
+            return message
+        logger.warning(
+            "Wrapper get message mengembalikan pesan kosong untuk %s/%s, "
+            "coba raw API",
+            chat, msg_id,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Wrapper get message timeout untuk %s/%s, coba raw API",
+            chat, msg_id,
+        )
+    except (MessageIdInvalid, MsgIdInvalid):
+        raise
+    except Exception as wrapper_error:
+        logger.warning(
+            "Wrapper get message gagal untuk %s/%s, coba raw API: %s",
+            chat, msg_id, wrapper_error,
+        )
+
+    try:
+        return await _get_message_via_raw_api(client, chat, msg_id)
     except asyncio.TimeoutError:
         raise
     except (MessageIdInvalid, MsgIdInvalid):
         raise
     except _PEER_ERRORS as raw_error:
-        # Raw channels.getMessages dapat menolak peer yang sebenarnya sudah
-        # berhasil di-resolve oleh Pyrogram. Coba wrapper dengan chat ID
-        # numerik sebelum mengembalikan error akses ke caller.
         logger.warning(
-            "Raw get message menolak peer %s/%s, coba wrapper Pyrogram: %s",
+            "Raw get message menolak peer %s/%s setelah wrapper gagal: %s",
             chat, msg_id, raw_error,
         )
-        try:
-            return await _hard_timeout(
-                client.get_messages(chat, msg_id),
-                timeout=_MSG_FETCH_TIMEOUT,
-                operation=f"get_messages({chat}, {msg_id})",
-            )
-        except Exception:
-            raise raw_error
+        raise
     except Exception as raw_error:
         logger.warning(
-            "Raw get message gagal untuk %s/%s, coba wrapper Pyrogram: %s",
+            "Raw get message gagal untuk %s/%s setelah wrapper gagal: %s",
             chat, msg_id, raw_error,
         )
-        return await _hard_timeout(
-            client.get_messages(chat, msg_id),
-            timeout=_MSG_FETCH_TIMEOUT,
-            operation=f"get_messages({chat}, {msg_id})",
-        )
+        raise
 
 
 async def inspect_message_media_size(
@@ -1698,10 +1698,30 @@ _ALBUM_MESSAGE_WINDOW = 10
 
 
 async def _fetch_album_messages(client, chat, msg_id: int, on_progress=None):
-    """Ambil seluruh album dengan satu request metadata MTProto."""
+    """Ambil seluruh album dengan wrapper Pyrogram dan fallback raw API."""
     await _notify_progress(
         on_progress, "📥 <b>Mengambil metadata album...</b>"
     )
+
+    try:
+        album_messages = await _hard_timeout(
+            client.get_media_group(chat, msg_id),
+            timeout=_ALBUM_FETCH_TIMEOUT,
+            operation=f"get_media_group({chat}, {msg_id})",
+        )
+        if album_messages:
+            return sorted(album_messages, key=lambda message: message.id)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "get_media_group timeout untuk %s/%s, coba raw API",
+            chat, msg_id,
+        )
+    except Exception as wrapper_error:
+        logger.warning(
+            "get_media_group gagal untuk %s/%s, coba raw API: %s",
+            chat, msg_id, wrapper_error,
+        )
+
     peer = await _hard_timeout(
         client.resolve_peer(chat),
         timeout=_PEER_RESOLVE_TIMEOUT,
