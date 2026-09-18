@@ -502,8 +502,6 @@ def setup(app):
                         "❌ <b>Album tidak dapat diproses oleh akun Free.</b>\n\n"
                         f"📦 Media terbesar dalam album: <b>{_fmt_size(file_size)}</b>\n"
                         f"📏 Batas akun Free: <b>{size_label}</b>\n\n"
-                        "Bot berjalan normal dan permintaan dihentikan sebelum "
-                        "download agar tidak terlihat stuck.\n"
                         "💎 Upgrade ke Premium untuk mengirim file hingga "
                         f"<b>{MAX_FILE_SIZE_MB_PREMIUM} MB</b>.",
                         parse_mode=ParseMode.HTML,

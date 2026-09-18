@@ -673,8 +673,6 @@ def _album_size_error(messages, is_premium: bool) -> str | None:
             "❌ <b>Album tidak dapat diproses oleh akun Free.</b>\n\n"
             f"📦 Media terbesar dalam album: <b>{largest}</b>\n"
             f"📏 Batas akun Free: <b>{size_label}</b>\n\n"
-            "Bot berjalan normal dan permintaan dihentikan sebelum download "
-            "agar tidak terlihat stuck.\n"
             "💎 Upgrade ke Premium untuk mengirim file hingga "
             f"<b>{MAX_FILE_SIZE_MB_PREMIUM} MB</b>."
         )
