@@ -185,6 +185,7 @@ _UPLOAD_TIMEOUT        = 300  # detik â timeout dasar upload file kecil
 _LARGE_TRANSFER_TIMEOUT_MAX = 2 * 60 * 60  # transfer Premium besar maksimal 2 jam
 _ALBUM_FETCH_TIMEOUT   = 30   # detik â batas waktu mengambil metadata album
 _ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file â dipakai di _send_album_via_bot
+_ALBUM_UPLOAD_TIMEOUT_MAX = 480  # jangan biarkan upload group melewati timeout job regular
 _BOT_COPY_TIMEOUT      = 30   # detik â jalur cepat untuk pesan channel publik
 _PROGRESS_CALLBACK_TIMEOUT = 5  # update status tidak boleh menahan transfer
 _TRANSFER_POLL_INTERVAL = 2  # detik â frekuensi pemeriksaan watchdog transfer
@@ -263,6 +264,65 @@ async def _notify_progress(on_progress, text: str):
         )
     except Exception:
         pass
+
+
+async def _send_media_group_with_watchdog(
+    bot,
+    user_chat_id: int,
+    batch: list[tuple],
+    on_progress,
+    timeout: int,
+):
+    """
+    Upload satu media group tanpa membiarkan status user diam selamanya.
+
+    PTB melakukan upload beberapa file dalam satu request, sehingga callback
+    progress Pyrogram tidak tersedia di fase ini. Task dipantau terpisah agar
+    status tetap hidup dan request yang macet dibatalkan sebelum timeout job.
+    """
+    task = asyncio.ensure_future(
+        bot.send_media_group(
+            user_chat_id,
+            media=[item[2] for item in batch],
+            write_timeout=_PTB_WRITE_TIMEOUT,
+            read_timeout=_PTB_READ_TIMEOUT,
+            connect_timeout=_PTB_CONNECT_TIMEOUT,
+        )
+    )
+    started_at = time.monotonic()
+    try:
+        while True:
+            remaining = timeout - (time.monotonic() - started_at)
+            if remaining <= 0:
+                logger.warning(
+                    "Album upload timeout setelah %ss (%s media)",
+                    timeout,
+                    len(batch),
+                )
+                task.cancel()
+                task.add_done_callback(_consume_cancelled_task)
+                raise asyncio.TimeoutError(
+                    f"album upload timeout setelah {timeout} detik"
+                )
+
+            done, _ = await asyncio.wait(
+                {task},
+                timeout=min(15, remaining),
+            )
+            if done:
+                return task.result()
+
+            elapsed = int(time.monotonic() - started_at)
+            await _notify_progress(
+                on_progress,
+                f"ð¤ <b>Mengirim album...</b> ({len(batch)} media)\n"
+                f"<i>Upload masih berjalan ({elapsed} detik)...</i>",
+            )
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            task.add_done_callback(_consume_cancelled_task)
+        raise
 
 
 async def _run_transfer_with_watchdog(
@@ -1200,6 +1260,25 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                     failed_batches.append("media tidak kompatibel")
                 continue
 
+            # Bot API tidak dapat menerima file >50 MB dalam sendMediaGroup.
+            # Jangan mencoba meng-upload group yang pasti ditolak setelah
+            # seluruh body request dikirim; gunakan jalur individual yang
+            # memilih Bot API atau Pyrogram sesuai ukuran setiap item.
+            oversized_for_bot = any(
+                (_get_file_size(item[0]) or 0) > _BOT_API_UPLOAD_LIMIT
+                for item in batch
+            )
+            if oversized_for_bot:
+                await _notify_progress(
+                    on_progress,
+                    f"ð¤ <b>Mengirim album satu per satu...</b> "
+                    f"({len(batch)} media, ada file di atas 50 MB)",
+                )
+                sent = await send_individually(batch)
+                if sent != len(batch):
+                    failed_batches.append(f"{sent}/{len(batch)} media tipe {batch_kind}")
+                continue
+
             if on_progress:
                 await _notify_progress(
                     on_progress,
@@ -1208,20 +1287,32 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 )
             try:
                 _album_timeout = (
-                    len(batch) * _ALBUM_UPLOAD_TIMEOUT_PER_FILE + 60
+                    min(
+                        len(batch) * _ALBUM_UPLOAD_TIMEOUT_PER_FILE + 60,
+                        _ALBUM_UPLOAD_TIMEOUT_MAX,
+                    )
                 )
-                await asyncio.wait_for(
-                    bot.send_media_group(
-                        user_chat_id,
-                        media=[item[2] for item in batch],
-                        write_timeout=_PTB_WRITE_TIMEOUT,
-                        read_timeout=_PTB_READ_TIMEOUT,
-                        connect_timeout=_PTB_CONNECT_TIMEOUT,
-                    ),
-                    timeout=_album_timeout,
+                await _send_media_group_with_watchdog(
+                    bot,
+                    user_chat_id,
+                    batch,
+                    on_progress,
+                    _album_timeout,
                 )
             except asyncio.CancelledError:
                 raise
+            except asyncio.TimeoutError as album_error:
+                # Request bisa saja sudah diterima Telegram ketika koneksi
+                # client macet. Jangan langsung fallback dan membuat duplikat.
+                logger.warning(
+                    "Timeout mengirim media group (%s media): %s",
+                    len(batch),
+                    album_error,
+                )
+                return False, (
+                    "Upload album timeout setelah beberapa menit. "
+                    "Coba lagi dengan album yang sama."
+                )
             except Exception as album_error:
                 logger.warning(
                     "Gagal mengirim media group (%s media, tipe %s): %s; "
