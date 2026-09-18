@@ -647,12 +647,13 @@ async def _get_message(client, chat, msg_id: int):
 
 async def inspect_message_media_size(
     client, chat, msg_id: int,
-) -> tuple[bool, int | None]:
+) -> tuple[bool, int | None, bool]:
     """
     Baca metadata pesan tanpa mengunduh media.
 
-    Return (has_media, file_size). Dipakai sebagai pre-flight agar file yang
-    melewati batas user ditolak sebelum quota dipotong atau masuk antrian.
+    Return (has_media, largest_file_size, is_album). Dipakai sebagai pre-flight
+    agar file yang melewati batas user ditolak sebelum quota dipotong atau
+    masuk antrian. Untuk album, ukuran terbesar dihitung dari seluruh media.
     """
     source_chat, source_error = await _resolve_source(client, chat)
     if source_error:
@@ -662,9 +663,22 @@ async def inspect_message_media_size(
     if not message or message.empty:
         raise RuntimeError(f"Pesan `{msg_id}` kosong atau sudah dihapus.")
 
-    return bool(message.media), _get_file_size(message)
+    is_album = bool(getattr(message, "media_group_id", None))
+    messages = [message]
+    if is_album:
+        messages = await _fetch_album_messages(client, source_chat, msg_id)
+        if not messages:
+            raise RuntimeError(f"Album pesan `{msg_id}` kosong atau sudah dihapus.")
 
-
+    media_messages = [
+        item for item in messages
+        if getattr(item, "media", None)
+    ]
+    sizes = [
+        size for size in (_get_file_size(item) for item in media_messages)
+        if size is not None
+    ]
+    return bool(media_messages), max(sizes, default=None), is_album
 def _get_file_size(msg) -> int | None:
     """Ambil ukuran file dari pesan, atau None jika tidak ada media."""
     for attr in ("document", "video", "audio", "voice", "video_note", "sticker", "animation"):
