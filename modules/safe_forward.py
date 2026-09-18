@@ -184,7 +184,6 @@ _DOWNLOAD_STALL_TIMEOUT = 45  # detik tanpa byte baru sebelum transfer dibatalka
 _UPLOAD_TIMEOUT        = 300  # detik â timeout dasar upload file kecil
 _LARGE_TRANSFER_TIMEOUT_MAX = 2 * 60 * 60  # transfer Premium besar maksimal 2 jam
 _ALBUM_FETCH_TIMEOUT   = 30   # detik â batas waktu mengambil metadata album
-_ALBUM_WRAPPER_TIMEOUT  = 15   # detik â batas jalur get_media_group sebelum raw fallback
 _ALBUM_UPLOAD_TIMEOUT_PER_FILE = 120  # detik per file â dipakai di _send_album_via_bot
 _BOT_COPY_TIMEOUT      = 30   # detik â jalur cepat untuk pesan channel publik
 _PROGRESS_CALLBACK_TIMEOUT = 5  # update status tidak boleh menahan transfer
@@ -622,14 +621,12 @@ async def _get_message(client, chat, msg_id: int):
 
 async def inspect_message_media_size(
     client, chat, msg_id: int,
-) -> tuple[bool, int | None, bool]:
+) -> tuple[bool, int | None]:
     """
     Baca metadata pesan tanpa mengunduh media.
 
-    Untuk album, ukuran terbesar dari seluruh media dikembalikan agar batas
-    akun diperiksa sebelum quota dipotong atau proses masuk antrian.
-
-    Return (has_media, file_size, is_album).
+    Return (has_media, file_size). Dipakai sebagai pre-flight agar file yang
+    melewati batas user ditolak sebelum quota dipotong atau masuk antrian.
     """
     source_chat, source_error = await _resolve_source(client, chat)
     if source_error:
@@ -639,48 +636,7 @@ async def inspect_message_media_size(
     if not message or message.empty:
         raise RuntimeError(f"Pesan `{msg_id}` kosong atau sudah dihapus.")
 
-    if message.media_group_id:
-        album_messages = await _hard_timeout(
-            _fetch_album_messages(client, source_chat, msg_id),
-            timeout=_ALBUM_WRAPPER_TIMEOUT + _PEER_RESOLVE_TIMEOUT + _ALBUM_FETCH_TIMEOUT + 8,
-            operation=f"inspect album size({source_chat}, {msg_id})",
-        )
-        sizes = [_get_file_size(item) for item in album_messages]
-        known_sizes = [size for size in sizes if size is not None]
-        return True, max(known_sizes) if known_sizes else None, True
-
-    return bool(message.media), _get_file_size(message), False
-
-
-def _album_size_error(messages, is_premium: bool) -> str | None:
-    """Buat alasan yang jelas sebelum album melewati batas akun."""
-    size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
-    size_label = (
-        f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
-        if is_premium else f"{MAX_FILE_SIZE_MB} MB (Free)"
-    )
-    oversized = [
-        _get_file_size(message)
-        for message in messages
-        if _get_file_size(message) and _get_file_size(message) > size_limit
-    ]
-    if not oversized:
-        return None
-
-    largest = _fmt_size(max(oversized))
-    if not is_premium:
-        return (
-            "❌ <b>Album tidak dapat diproses oleh akun Free.</b>\n\n"
-            f"📦 Media terbesar dalam album: <b>{largest}</b>\n"
-            f"📏 Batas akun Free: <b>{size_label}</b>\n\n"
-            "💎 Upgrade ke Premium untuk mengirim file hingga "
-            f"<b>{MAX_FILE_SIZE_MB_PREMIUM} MB</b>."
-        )
-
-    return (
-        f"Album memiliki media terlalu besar ({largest}). "
-        f"Batas maksimal: {size_label}."
-    )
+    return bool(message.media), _get_file_size(message)
 
 
 def _get_file_size(msg) -> int | None:
@@ -984,6 +940,51 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def _album_media_kind(message) -> str | None:
+    """Return the Bot API media-group type supported for this message."""
+    if getattr(message, "photo", None) or getattr(message, "video", None):
+        return "visual"
+    if getattr(message, "audio", None):
+        return "audio"
+    if getattr(message, "document", None):
+        return "document"
+    return None
+
+
+def _album_batches(items: list[tuple]) -> list[list[tuple]]:
+    """
+    Split downloaded items into Telegram-compatible media groups.
+
+    Photos and videos may share one group. Audio and documents must each stay
+    in their own group. Unsupported media types are returned as one-item
+    batches so the caller can send them individually.
+    """
+    batches: list[list[tuple]] = []
+    current: list[tuple] = []
+    current_kind: str | None = None
+
+    for item in items:
+        kind = item[3]
+        if kind is None:
+            if current:
+                batches.append(current)
+                current = []
+                current_kind = None
+            batches.append([item])
+            continue
+
+        if current and (kind != current_kind or len(current) >= 10):
+            batches.append(current)
+            current = []
+
+        current.append(item)
+        current_kind = kind
+
+    if current:
+        batches.append(current)
+    return batches
+
+
 async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                               on_progress=None, is_premium: bool = False,
                               messages=None):
@@ -997,15 +998,26 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
     else:
         msgs = messages
     total = len(msgs)
-    size_error = _album_size_error(msgs, is_premium)
-    if size_error:
-        return False, size_error
+    size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
+    size_label = (
+        f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
+        if is_premium else f"{MAX_FILE_SIZE_MB} MB"
+    )
+    oversized = [
+        _get_file_size(m) for m in msgs
+        if _get_file_size(m) and _get_file_size(m) > size_limit
+    ]
+    if oversized:
+        return False, (
+            f"Album memiliki media terlalu besar ({_fmt_size(max(oversized))}). "
+            f"Batas maksimal: {size_label}."
+        )
     paths: list[str]    = []
     download_dirs: list[str] = []
     thumbnail_paths: list[str] = []
     handles: list       = []
     thumbnail_handles: list = []
-    media_items         = []
+    downloaded_items: list[tuple] = []
 
     try:
         for i, m in enumerate(msgs):
@@ -1059,7 +1071,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             handles.append(f)
 
             if m.photo:
-                media_items.append(InputMediaPhoto(media=f, caption=caption))
+                media_item = InputMediaPhoto(media=f, caption=caption)
             elif m.video:
                 thumbnail_path = await _create_video_thumbnail_async(path)
                 thumbnail_handle = None
@@ -1079,45 +1091,117 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 video_kwargs = {}
                 if thumbnail_handle:
                     video_kwargs["thumbnail"] = thumbnail_handle
-                media_items.append(
-                    InputMediaVideo(
-                        media=f,
-                        caption=caption,
-                        supports_streaming=True,
-                        **_video_metadata(m),
-                        **video_kwargs,
-                    )
+                media_item = InputMediaVideo(
+                    media=f,
+                    caption=caption,
+                    supports_streaming=True,
+                    **_video_metadata(m),
+                    **video_kwargs,
                 )
             elif m.audio:
-                media_items.append(InputMediaAudio(media=f, caption=caption))
+                media_item = InputMediaAudio(media=f, caption=caption)
             elif m.animation:
-                media_items.append(InputMediaAnimation(media=f, caption=caption))
+                media_item = InputMediaAnimation(media=f, caption=caption)
             else:
-                media_items.append(InputMediaDocument(media=f, caption=caption))
+                media_item = InputMediaDocument(media=f, caption=caption)
 
-        if len(paths) != total:
-            raise RuntimeError(
-                f"Album tidak lengkap: hanya {len(paths)}/{total} media berhasil diunduh."
+            downloaded_items.append(
+                (m, path, media_item, _album_media_kind(m))
             )
 
-        if media_items:
+        if len(downloaded_items) != total:
+            raise RuntimeError(
+                f"Album tidak lengkap: hanya {len(downloaded_items)}/{total} "
+                "media berhasil diunduh."
+            )
+
+        async def send_individually(items: list[tuple]) -> int:
+            sent = 0
+            for index, (message, path, _, _) in enumerate(items, 1):
+                item_sent = False
+                for send_attempt in range(2):
+                    if on_progress:
+                        await _notify_progress(
+                            on_progress,
+                            f"ð¤ <b>Mengirim media satuan...</b> "
+                            f"({index}/{len(items)}, percobaan {send_attempt + 1}/2)",
+                        )
+                    try:
+                        await _send_album_item(
+                            client, bot, message, path, user_chat_id
+                        )
+                        item_sent = True
+                        sent += 1
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as send_error:
+                        logger.warning(
+                            "Gagal mengirim album item %s attempt %s: %s",
+                            getattr(message, "id", "?"),
+                            send_attempt + 1,
+                            send_error,
+                        )
+                        if send_attempt == 0:
+                            await asyncio.sleep(2)
+                if not item_sent:
+                    logger.error(
+                        "Album item %s gagal setelah 2 percobaan.",
+                        getattr(message, "id", "?"),
+                    )
+            return sent
+
+        failed_batches: list[str] = []
+        for batch in _album_batches(downloaded_items):
+            batch_kind = batch[0][3]
+            if batch_kind is None or len(batch) < 2:
+                sent = await send_individually(batch)
+                if sent != len(batch):
+                    failed_batches.append("media tidak kompatibel")
+                continue
+
             if on_progress:
                 await _notify_progress(
                     on_progress,
-                    f"ð¤ <b>Mengirim album...</b> ({len(paths)}/{total})",
+                    f"ð¤ <b>Mengirim album...</b> "
+                    f"({len(batch)} media)",
                 )
-            # Timeout proporsional: 120 detik per file + 60 detik buffer
-            _album_timeout = len(paths) * _ALBUM_UPLOAD_TIMEOUT_PER_FILE + 60
-            await asyncio.wait_for(
-                bot.send_media_group(
-                    user_chat_id,
-                    media=media_items,
-                    write_timeout=_PTB_WRITE_TIMEOUT,
-                    read_timeout=_PTB_READ_TIMEOUT,
-                    connect_timeout=_PTB_CONNECT_TIMEOUT,
-                ),
-                timeout=_album_timeout,
+            try:
+                _album_timeout = (
+                    len(batch) * _ALBUM_UPLOAD_TIMEOUT_PER_FILE + 60
+                )
+                await asyncio.wait_for(
+                    bot.send_media_group(
+                        user_chat_id,
+                        media=[item[2] for item in batch],
+                        write_timeout=_PTB_WRITE_TIMEOUT,
+                        read_timeout=_PTB_READ_TIMEOUT,
+                        connect_timeout=_PTB_CONNECT_TIMEOUT,
+                    ),
+                    timeout=_album_timeout,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as album_error:
+                logger.warning(
+                    "Gagal mengirim media group (%s media, tipe %s): %s; "
+                    "fallback ke pengiriman satuan",
+                    len(batch),
+                    batch_kind,
+                    album_error,
+                )
+                sent = await send_individually(batch)
+                if sent != len(batch):
+                    failed_batches.append(
+                        f"{sent}/{len(batch)} media tipe {batch_kind}"
+                    )
+
+        if failed_batches:
+            return False, (
+                "Sebagian media album gagal dikirim: "
+                + ", ".join(failed_batches)
             )
+        return True, None
     finally:
         for f in handles:
             try:
@@ -1472,9 +1556,20 @@ async def _send_album_individually(
         return False, "Album kosong atau tidak ditemukan."
 
     total = len(msgs)
-    size_error = _album_size_error(msgs, is_premium)
-    if size_error:
-        return False, size_error
+    size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
+    size_label = (
+        f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
+        if is_premium else f"{MAX_FILE_SIZE_MB} MB"
+    )
+    oversized = [
+        _get_file_size(m) for m in msgs
+        if _get_file_size(m) and _get_file_size(m) > size_limit
+    ]
+    if oversized:
+        return False, (
+            f"Album memiliki media terlalu besar ({_fmt_size(max(oversized))}). "
+            f"Batas maksimal: {size_label}."
+        )
 
     # Download semua file terlebih dahulu
     paths: list[str] = []
@@ -1483,14 +1578,6 @@ async def _send_album_individually(
         file_size  = _get_file_size(m) or 0
         dl_timeout = max(60, 30 + (file_size // (10 * 1024 * 1024)) * 30)
         dl_cb = None
-        if on_progress:
-            # Callback Pyrogram untuk video besar baru muncul setelah byte
-            # pertama diterima. Status awal mencegah fase persiapan terlihat
-            # macet selama transfer belum mengirim callback.
-            await _notify_progress(
-                on_progress,
-                f"<b>Mengunduh album...</b> ({i + 1}/{total})",
-            )
         if on_progress and file_size >= _PROGRESS_MIN_BYTES:
             dl_cb = _make_pyrogram_progress(
                 on_progress,
@@ -1585,42 +1672,10 @@ _ALBUM_MESSAGE_WINDOW = 10
 
 
 async def _fetch_album_messages(client, chat, msg_id: int, on_progress=None):
-    """Ambil seluruh album dengan fallback wrapper/raw yang dibatasi waktu."""
+    """Ambil seluruh album dengan satu request metadata MTProto."""
     await _notify_progress(
         on_progress, "📥 <b>Mengambil metadata album...</b>"
     )
-
-    # get_media_group adalah jalur Pyrogram yang paling kompatibel untuk
-    # album. Gunakan numeric chat ID hasil resolve agar tidak memicu lookup
-    # username kedua. Jalur ini sengaja dibatasi; beberapa session dapat
-    # menggantung di wrapper sehingga raw MTProto tetap diperlukan sebagai
-    # fallback.
-    try:
-        wrapper_messages = await _hard_timeout(
-            client.get_media_group(chat, msg_id),
-            timeout=_ALBUM_WRAPPER_TIMEOUT,
-            operation=f"get_media_group({chat}, {msg_id})",
-        )
-        if wrapper_messages:
-            album_messages = sorted(wrapper_messages, key=lambda message: message.id)
-            await _notify_progress(
-                on_progress,
-                f"📥 <b>Album ditemukan</b> ({len(album_messages)} media)",
-            )
-            return album_messages
-    except asyncio.TimeoutError:
-        logger.warning(
-            "get_media_group timeout for %s/%s; mencoba raw MTProto",
-            chat, msg_id,
-        )
-    except Exception as wrapper_error:
-        logger.warning(
-            "get_media_group gagal untuk %s/%s; mencoba raw MTProto: %s",
-            chat, msg_id, wrapper_error,
-        )
-
-    # Fallback raw menghindari lookup wrapper yang dapat berhenti setelah peer
-    # berhasil di-resolve. Ini juga tetap dibatasi oleh timeout di setiap tahap.
     peer = await _hard_timeout(
         client.resolve_peer(chat),
         timeout=_PEER_RESOLVE_TIMEOUT,
@@ -1700,6 +1755,45 @@ async def _copy_public_album(
     """
     if not isinstance(source_chat, str) or not source_chat.startswith("@"):
         return None
+
+    # Bot API dapat menyalin album publik sebagai satu media group. Gunakan
+    # jalur ini terlebih dahulu agar album tidak dipecah menjadi pesan satuan.
+    message_ids = [message.id for message in messages]
+    if len(message_ids) >= 2 and hasattr(bot, "copy_messages"):
+        await _notify_progress(
+            on_progress,
+            f"ð¤ <b>Menyalin album...</b> ({len(message_ids)} media)",
+        )
+        try:
+            await asyncio.wait_for(
+                bot.copy_messages(
+                    chat_id=user_chat_id,
+                    from_chat_id=source_chat,
+                    message_ids=message_ids,
+                    write_timeout=_PTB_WRITE_TIMEOUT,
+                    read_timeout=_PTB_READ_TIMEOUT,
+                    connect_timeout=_PTB_CONNECT_TIMEOUT,
+                ),
+                timeout=_BOT_COPY_TIMEOUT,
+            )
+            return True, None
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timeout saat menyalin album publik %s sebagai group",
+                source_chat,
+            )
+        except (BadRequest, Forbidden) as exc:
+            logger.info(
+                "copy_messages tidak tersedia untuk album publik %s: %s",
+                source_chat,
+                exc,
+            )
+        except Exception as exc:
+            logger.warning(
+                "copy_messages gagal untuk album publik %s: %s",
+                source_chat,
+                exc,
+            )
 
     copied = 0
     for index, message in enumerate(messages, 1):
@@ -1782,12 +1876,7 @@ class SafeForward:
                         _fetch_album_messages(
                             client, source_chat, msg_id, on_progress=on_progress
                         ),
-                        timeout=(
-                            _ALBUM_WRAPPER_TIMEOUT
-                            + _PEER_RESOLVE_TIMEOUT
-                            + _ALBUM_FETCH_TIMEOUT
-                            + 8
-                        ),
+                        timeout=_ALBUM_FETCH_TIMEOUT + 8,
                         operation=f"fetch album({source_chat}, {msg_id})",
                     )
                 except asyncio.TimeoutError:
@@ -1803,33 +1892,11 @@ class SafeForward:
                         "Album metadata error for %s/%s", source_chat, msg_id
                     )
                     return False, f"Gagal mengambil album: {e}"
-                size_error = _album_size_error(album_messages, is_premium)
-                if size_error:
-                    return False, size_error
                 is_restricted = any(
                     bool(getattr(message, "has_protected_content", False))
                     for message in album_messages
                 )
                 if is_restricted:
-                    return await _send_album_individually(
-                        client, bot, source_chat, msg_id, user_chat_id,
-                        on_progress=on_progress, is_premium=is_premium,
-                        messages=album_messages,
-                    )
-
-                # Link /c/... berasal dari chat privat. Jangan gunakan
-                # send_media_group Bot API untuk jalur ini: Bot API tidak
-                # dapat membaca chat privat dan album yang berisi video besar
-                # akan menunggu sampai seluruh group siap sebelum memberi
-                # fallback. Kirim per item lewat jalur yang sama dengan
-                # protected content agar setiap media punya progres, timeout,
-                # dan pembersihan file sendiri.
-                if not (isinstance(chat, str) and chat.startswith("@")):
-                    await _notify_progress(
-                        on_progress,
-                        f"📥 <b>Album ditemukan</b> ({len(album_messages)} media)\n"
-                        "🔄 <b>Menyiapkan pengiriman satu per satu...</b>",
-                    )
                     return await _send_album_individually(
                         client, bot, source_chat, msg_id, user_chat_id,
                         on_progress=on_progress, is_premium=is_premium,
