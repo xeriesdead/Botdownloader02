@@ -600,13 +600,39 @@ async def _get_message_via_raw_api(client, chat, msg_id: int):
 async def _get_message(client, chat, msg_id: int):
     """Ambil pesan dengan raw API dan fallback wrapper untuk kompatibilitas."""
     try:
-        return await _get_message_via_raw_api(client, chat, msg_id)
+        raw_message = await _get_message_via_raw_api(client, chat, msg_id)
+        if raw_message is not None:
+            return raw_message
+        logger.warning(
+            "Raw get message mengembalikan pesan kosong untuk %s/%s, "
+            "coba wrapper Pyrogram",
+            chat, msg_id,
+        )
+        return await _hard_timeout(
+            client.get_messages(chat, msg_id),
+            timeout=_MSG_FETCH_TIMEOUT,
+            operation=f"get_messages({chat}, {msg_id})",
+        )
     except asyncio.TimeoutError:
         raise
     except (MessageIdInvalid, MsgIdInvalid):
         raise
-    except _PEER_ERRORS:
-        raise
+    except _PEER_ERRORS as raw_error:
+        # Raw channels.getMessages dapat menolak peer yang sebenarnya sudah
+        # berhasil di-resolve oleh Pyrogram. Coba wrapper dengan chat ID
+        # numerik sebelum mengembalikan error akses ke caller.
+        logger.warning(
+            "Raw get message menolak peer %s/%s, coba wrapper Pyrogram: %s",
+            chat, msg_id, raw_error,
+        )
+        try:
+            return await _hard_timeout(
+                client.get_messages(chat, msg_id),
+                timeout=_MSG_FETCH_TIMEOUT,
+                operation=f"get_messages({chat}, {msg_id})",
+            )
+        except Exception:
+            raise raw_error
     except Exception as raw_error:
         logger.warning(
             "Raw get message gagal untuk %s/%s, coba wrapper Pyrogram: %s",
