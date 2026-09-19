@@ -8,3 +8,5 @@ When the configured HTTPS Git remote rejects authentication, the installed Repli
 **Why:** The workspace may have a valid GitHub integration while the shell's cached HTTPS credential is stale; asking for a token would bypass the safer managed connection.
 
 **How to apply:** Resolve the active GitHub connection, verify the remote branch parent, create blobs/tree/commit, update the branch ref without force, then verify the resulting remote commit and keep the local working tree clean.
+
+**Environment note:** The connector proxy needs a Replit identity header for write operations; if the GitHub row remains `not_added` and the sandbox has no identity variables, stop rather than requesting or exposing a personal token.
