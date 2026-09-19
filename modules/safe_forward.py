@@ -118,6 +118,7 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
     state = {
         "last_time": 0.0,
         "last_pct": -1,
+        "last_current": -1,
         "start_time": 0.0,   # waktu byte pertama diterima
         "started": False,
     }
@@ -134,12 +135,13 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
 
         pct = int(current * 100 / total)
         if (
-            pct == state["last_pct"]
+            current == state["last_current"]
             or (now - state["last_time"] < 3.0 and pct - state["last_pct"] < 10)
         ):
             return
         state["last_time"] = now
         state["last_pct"] = pct
+        state["last_current"] = current
 
         # Hitung kecepatan rata-rata dan ETA
         elapsed = now - state["start_time"]
@@ -1160,9 +1162,13 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                     if _dl_attempt == 0:
                         await asyncio.sleep(2)
             if not path:
-                logger.error(f"Skip album item {i + 1}/{total} msg {m.id} setelah 2 percobaan.")
+                reason = (
+                    f"Album berhenti pada media {i + 1}/{total}: "
+                    "download tidak selesai setelah 2 percobaan."
+                )
+                logger.error("%s msg %s", reason, m.id)
                 shutil.rmtree(item_dir, ignore_errors=True)
-                continue
+                return False, reason
             paths.append(path)
             download_dirs.append(item_dir)
 
@@ -1210,7 +1216,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             )
 
         if len(downloaded_items) != total:
-            raise RuntimeError(
+            return False, (
                 f"Album tidak lengkap: hanya {len(downloaded_items)}/{total} "
                 "media berhasil diunduh."
             )
@@ -1228,7 +1234,8 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                         )
                     try:
                         await _send_album_item(
-                            client, bot, message, path, user_chat_id
+                            client, bot, message, path, user_chat_id,
+                            on_progress=on_progress,
                         )
                         item_sent = True
                         sent += 1
@@ -1531,6 +1538,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
 
 async def _send_album_item(
     client, bot, msg, path: str, user_chat_id: int,
+    on_progress=None,
 ) -> None:
     """Kirim satu item album melalui jalur yang sesuai dengan ukuran file."""
     caption = _build_caption(msg.caption or "")
@@ -1552,54 +1560,95 @@ async def _send_album_item(
 
     try:
         if file_size > _BOT_API_UPLOAD_LIMIT:
+            upload_progress = (
+                _make_pyrogram_progress(on_progress, "Mengirim", file_size)
+                if on_progress else None
+            )
             if msg.photo:
-                await _hard_timeout(
-                    client.send_photo(bot_peer, path, caption=caption),
+                await _run_transfer_with_watchdog(
+                    lambda transfer_progress: client.send_photo(
+                        bot_peer,
+                        path,
+                        caption=caption,
+                        progress=transfer_progress,
+                    ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_photo",
+                    progress=upload_progress,
                 )
             elif msg.video:
-                await _hard_timeout(
-                    client.send_video(
+                await _run_transfer_with_watchdog(
+                    lambda transfer_progress: client.send_video(
                         bot_peer,
                         path,
                         caption=caption,
                         supports_streaming=True,
                         thumb=thumbnail_path,
+                        progress=transfer_progress,
                         **metadata,
                     ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_video",
+                    progress=upload_progress,
                 )
             elif msg.audio:
-                await _hard_timeout(
-                    client.send_audio(bot_peer, path, caption=caption),
+                await _run_transfer_with_watchdog(
+                    lambda transfer_progress: client.send_audio(
+                        bot_peer,
+                        path,
+                        caption=caption,
+                        progress=transfer_progress,
+                    ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_audio",
+                    progress=upload_progress,
                 )
             elif msg.voice:
-                await _hard_timeout(
-                    client.send_voice(bot_peer, path, caption=caption),
+                await _run_transfer_with_watchdog(
+                    lambda transfer_progress: client.send_voice(
+                        bot_peer,
+                        path,
+                        caption=caption,
+                        progress=transfer_progress,
+                    ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_voice",
+                    progress=upload_progress,
                 )
             elif msg.video_note:
-                await _hard_timeout(
-                    client.send_video_note(bot_peer, path),
+                await _run_transfer_with_watchdog(
+                    lambda transfer_progress: client.send_video_note(
+                        bot_peer,
+                        path,
+                        progress=transfer_progress,
+                    ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_video_note",
+                    progress=upload_progress,
                 )
             elif msg.animation:
-                await _hard_timeout(
-                    client.send_animation(bot_peer, path, caption=caption),
+                await _run_transfer_with_watchdog(
+                    lambda transfer_progress: client.send_animation(
+                        bot_peer,
+                        path,
+                        caption=caption,
+                        progress=transfer_progress,
+                    ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_animation",
+                    progress=upload_progress,
                 )
             else:
-                await _hard_timeout(
-                    client.send_document(bot_peer, path, caption=caption),
+                await _run_transfer_with_watchdog(
+                    lambda transfer_progress: client.send_document(
+                        bot_peer,
+                        path,
+                        caption=caption,
+                        progress=transfer_progress,
+                    ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_document",
+                    progress=upload_progress,
                 )
             return
 
@@ -1770,7 +1819,10 @@ async def _send_album_individually(
                 except Exception:
                     pass
             try:
-                await _send_album_item(client, bot, m, path, user_chat_id)
+                await _send_album_item(
+                    client, bot, m, path, user_chat_id,
+                    on_progress=on_progress,
+                )
                 item_sent = True
                 sent += 1
                 break
