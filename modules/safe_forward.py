@@ -82,7 +82,7 @@ _THUMBNAIL_MAX_BYTES = 200 * 1024
 
 def _progress_bar(pct: int, width: int = 10) -> str:
     filled = round(pct / 100 * width)
-    return "â" * filled + "â" * (width - filled)
+    return "█" * filled + "░" * (width - filled)
 
 
 def _fmt_eta(seconds: float) -> str:
@@ -156,11 +156,11 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
         if speed_str:
             info_parts.append(speed_str)
         if eta_str:
-            info_parts.append(f"â± {eta_str}")
-        info_line = " â¢ ".join(info_parts)
+            info_parts.append(f"⏱ {eta_str}")
+        info_line = " • ".join(info_parts)
 
         text = (
-            f"â³ <b>{phase}...</b>\n"
+            f"⏳ <b>{phase}...</b>\n"
             f"<code>[{bar}]</code> {pct}%\n"
             f"{info_line}"
         )
@@ -315,7 +315,7 @@ async def _send_media_group_with_watchdog(
             elapsed = int(time.monotonic() - started_at)
             await _notify_progress(
                 on_progress,
-                f"ð¤ <b>Mengirim album...</b> ({len(batch)} media)\n"
+                f"📤 <b>Mengirim album...</b> ({len(batch)} media)\n"
                 f"<i>Upload masih berjalan ({elapsed} detik)...</i>",
             )
     except BaseException:
@@ -439,7 +439,7 @@ async def copy_public_message(
         return False
 
     await _notify_progress(
-        on_progress, "ð¤ <b>Menyalin pesan dari channel publik...</b>"
+        on_progress, "📤 <b>Menyalin pesan dari channel publik...</b>"
     )
     try:
         await asyncio.wait_for(
@@ -473,7 +473,7 @@ async def copy_public_message(
     # Beberapa pesan/media publik ditolak oleh copyMessage tetapi masih bisa
     # diteruskan lewat forwardMessage. Ini juga tidak memakai download lokal.
     await _notify_progress(
-        on_progress, "ð¤ <b>Meneruskan media besar tanpa download ulang...</b>"
+        on_progress, "📤 <b>Meneruskan media besar tanpa download ulang...</b>"
     )
     try:
         await asyncio.wait_for(
@@ -521,17 +521,17 @@ async def check_channel_access(client, chat) -> tuple[bool, str]:
         return True, ""
     except asyncio.TimeoutError:
         return False, (
-            "â³ <b>Tidak bisa memeriksa channel (timeout).</b>\n"
+            "⏳ <b>Tidak bisa memeriksa channel (timeout).</b>\n"
             "Pastikan akun sudah bergabung, lalu coba lagi."
         )
     except _PEER_ERRORS:
         return False, (
-            "ð <b>Akses ditolak.</b>\n\n"
+            "🔒 <b>Akses ditolak.</b>\n\n"
             f"Akun kamu belum bergabung ke channel <code>{label}</code>.\n"
             "Silakan join channel tersebut terlebih dahulu, lalu coba lagi."
         )
     except (UsernameNotOccupied, UsernameInvalid):
-        return False, f"â Channel <code>{label}</code> tidak ditemukan atau sudah tidak aktif."
+        return False, f"❌ Channel <code>{label}</code> tidak ditemukan atau sudah tidak aktif."
     except Exception as e:
         logger.warning(f"check_channel_access({chat}): {e}")
         # Jika cek gagal karena alasan lain (misal network), biarkan lanjut â
@@ -583,14 +583,14 @@ async def _resolve_source(client, chat) -> tuple[object | None, str | None]:
     except asyncio.TimeoutError:
         logger.warning(f"Timeout get_chat({chat})")
         return None, (
-            f"â Tidak bisa mengakses channel (timeout).\n"
+            f"❌ Tidak bisa mengakses channel (timeout).\n"
             "Pastikan akun sudah bergabung ke channel tersebut."
         )
     except (UsernameNotOccupied, UsernameInvalid):
         return None, f"Channel/grup `{label}` tidak ditemukan atau sudah tidak aktif."
     except _PEER_ERRORS:
         return None, (
-            f"â Tidak bisa mengakses channel.\n"
+            f"❌ Tidak bisa mengakses channel.\n"
             "Pastikan akun yang login sudah bergabung ke channel/grup tersebut."
         )
     except Exception as e:
@@ -938,12 +938,12 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                 progress=dl_cb,
             )
         except asyncio.TimeoutError:
-            raise RuntimeError("Download timeout â file terlalu lama diunduh, coba lagi.")
+            raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
 
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
-        await _notify_progress(on_progress, "ð¤ <b>Mengirim media...</b>")
+        await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
         caption = _build_caption(msg.caption or "")
         # Buat thumbnail dari frame video setelah download selesai. Jika FFmpeg
         # gagal, upload tetap dilanjutkan tanpa thumbnail.
@@ -1029,7 +1029,7 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                 )
     except asyncio.TimeoutError as exc:
         raise RuntimeError(
-            "Upload timeout â koneksi ke Telegram terlalu lambat. Coba lagi."
+            "Upload timeout — koneksi ke Telegram terlalu lambat. Coba lagi."
         ) from exc
     finally:
         if thumbnail_path:
@@ -1135,7 +1135,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             elif on_progress:
                 await _notify_progress(
                     on_progress,
-                    f"ð¥ <b>Mengunduh album...</b> ({i + 1}/{total})",
+                    f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})",
                 )
             path = None
             item_dir = _new_download_dir(user_chat_id)
@@ -1223,7 +1223,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                     if on_progress:
                         await _notify_progress(
                             on_progress,
-                            f"ð¤ <b>Mengirim media satuan...</b> "
+                            f"📤 <b>Mengirim media satuan...</b> "
                             f"({index}/{len(items)}, percobaan {send_attempt + 1}/2)",
                         )
                     try:
@@ -1271,7 +1271,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             if oversized_for_bot:
                 await _notify_progress(
                     on_progress,
-                    f"ð¤ <b>Mengirim album satu per satu...</b> "
+                    f"📤 <b>Mengirim album satu per satu...</b> "
                     f"({len(batch)} media, ada file di atas 50 MB)",
                 )
                 sent = await send_individually(batch)
@@ -1282,7 +1282,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             if on_progress:
                 await _notify_progress(
                     on_progress,
-                    f"ð¤ <b>Mengirim album...</b> "
+                    f"📤 <b>Mengirim album...</b> "
                     f"({len(batch)} media)",
                 )
             try:
@@ -1399,12 +1399,12 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                 progress=dl_cb,
             )
         except asyncio.TimeoutError:
-            raise RuntimeError("Download timeout â file terlalu lama diunduh, coba lagi.")
+            raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
 
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
-        await _notify_progress(on_progress, "ð¤ <b>Mengirim media...</b>")
+        await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
         # Kirim ke chat bot (bukan Saved Messages).
         # Dari sudut pandang Pyrogram (login sebagai user), mengirim ke @bot_username
         # membuat file muncul langsung di chat antara user dan bot.
@@ -1518,7 +1518,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
             )
     except asyncio.TimeoutError as exc:
         raise RuntimeError(
-            "Upload timeout â koneksi Telegram terlalu lambat. Coba lagi."
+            "Upload timeout — koneksi Telegram terlalu lambat. Coba lagi."
         ) from exc
     finally:
         if thumbnail_path:
@@ -1718,7 +1718,7 @@ async def _send_album_individually(
         elif on_progress:
             await _notify_progress(
                 on_progress,
-                f"ð¥ <b>Mengunduh album...</b> ({i + 1}/{total})",
+                f"📥 <b>Mengunduh album...</b> ({i + 1}/{total})",
             )
         path = None
         item_dir = _new_download_dir(user_chat_id)
@@ -1764,7 +1764,7 @@ async def _send_album_individually(
             if on_progress:
                 try:
                     await on_progress(
-                        f"ð¤ <b>Mengirim album...</b> "
+                        f"📤 <b>Mengirim album...</b> "
                         f"({idx + 1}/{n_paths}, percobaan {_send_attempt + 1}/2)"
                     )
                 except Exception:
@@ -1913,7 +1913,7 @@ async def _copy_public_album(
     if len(message_ids) >= 2 and hasattr(bot, "copy_messages"):
         await _notify_progress(
             on_progress,
-            f"ð¤ <b>Menyalin album...</b> ({len(message_ids)} media)",
+            f"📤 <b>Menyalin album...</b> ({len(message_ids)} media)",
         )
         try:
             await asyncio.wait_for(
@@ -1950,7 +1950,7 @@ async def _copy_public_album(
     for index, message in enumerate(messages, 1):
         await _notify_progress(
             on_progress,
-            f"ð¤ <b>Menyalin album...</b> ({index}/{len(messages)})",
+            f"📤 <b>Menyalin album...</b> ({index}/{len(messages)})",
         )
         try:
             await asyncio.wait_for(
@@ -2009,7 +2009,7 @@ class SafeForward:
         on_progress: async callable(text: str) untuk update status (opsional).
         Return (True, None) jika berhasil, (False, alasan) jika gagal.
         """
-        await _notify_progress(on_progress, "ð <b>Menghubungkan ke channel...</b>")
+        await _notify_progress(on_progress, "🔌 <b>Menghubungkan ke channel...</b>")
         source_chat, src_err = await _resolve_source(client, chat)
         if src_err:
             return False, src_err
@@ -2021,7 +2021,7 @@ class SafeForward:
 
         for attempt in range(MAX_RETRIES + 1):
             try:
-                await _notify_progress(on_progress, "ð¥ <b>Mengambil album...</b>")
+                await _notify_progress(on_progress, "📥 <b>Mengambil album...</b>")
                 try:
                     album_messages = await _hard_timeout(
                         _fetch_album_messages(
@@ -2080,7 +2080,7 @@ class SafeForward:
                     try:
                         await bot.send_message(
                             user_chat_id,
-                            f"â³ <b>Telegram membatasi kecepatan sementara.</b>\n"
+                            f"⏳ <b>Telegram membatasi kecepatan sementara.</b>\n"
                             f"Menunggu <b>{wait} detik</b> lalu mencoba ulang...",
                             parse_mode="HTML",
                         )
@@ -2155,7 +2155,7 @@ class SafeForward:
                 logger.exception("Public message copy helper failed for %s/%s", chat, msg_id)
 
         # ââ Langkah 1: Pastikan source bisa diakses ââââââââââââââââââââââ
-        await _notify_progress(on_progress, "ð <b>Menghubungkan ke channel...</b>")
+        await _notify_progress(on_progress, "🔌 <b>Menghubungkan ke channel...</b>")
         source_chat, src_err = await _resolve_source(client, chat)
         if src_err:
             return False, src_err
@@ -2163,20 +2163,20 @@ class SafeForward:
         # The album branch handles protected content after fetching metadata.
 
         # ââ Langkah 2: Ambil pesan âââââââââââââââââââââââââââââââââââââââ
-        await _notify_progress(on_progress, "ð¥ <b>Mengambil pesan dari channel...</b>")
+        await _notify_progress(on_progress, "📥 <b>Mengambil pesan dari channel...</b>")
         try:
             msg = await _get_message(client, source_chat, msg_id)
         except asyncio.TimeoutError:
             logger.warning(f"Timeout get_messages({source_chat}, {msg_id})")
             return False, (
-                "â Tidak bisa mengambil pesan (timeout).\n"
+                "❌ Tidak bisa mengambil pesan (timeout).\n"
                 "Pastikan akun sudah bergabung ke channel tersebut."
             )
         except (MessageIdInvalid, MsgIdInvalid):
             return False, f"Pesan nomor `{msg_id}` tidak ditemukan."
         except _PEER_ERRORS:
             return False, (
-                "â Tidak bisa mengakses channel.\n"
+                "❌ Tidak bisa mengakses channel.\n"
                 "Pastikan akun yang login sudah bergabung ke channel/grup tersebut."
             )
         except Exception as e:
@@ -2194,7 +2194,7 @@ class SafeForward:
             )
 
         # Single messages still use the protected-content check after fetch.
-        await _notify_progress(on_progress, "ð <b>Memeriksa akses media...</b>")
+        await _notify_progress(on_progress, "🔎 <b>Memeriksa akses media...</b>")
         is_restricted = await _is_forwards_restricted(client, source_chat)
         # ââ Langkah 3: Cek ukuran file terhadap hard limit âââââââââââââââ
         file_size  = _get_file_size(msg)
@@ -2272,7 +2272,7 @@ class SafeForward:
                     try:
                         await bot.send_message(
                             user_chat_id,
-                            f"â³ <b>Telegram membatasi kecepatan sementara.</b>\n"
+                            f"⏳ <b>Telegram membatasi kecepatan sementara.</b>\n"
                             f"Menunggu <b>{wait} detik</b> lalu mencoba ulang...",
                             parse_mode="HTML",
                         )
