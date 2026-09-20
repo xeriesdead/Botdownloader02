@@ -4,3 +4,4 @@
 - [Telegram resolved chat IDs](telegram-resolved-chat-ids.md) — fetch messages with the numeric chat ID after resolving a username to avoid Pyrogram lookup hangs.
 - [Railway memory safety](railway-memory-safety.md) — long-running Telegram media jobs must be serialized and cached Pyrogram clients released.
 - [GitHub API fallback](github-api-fallback.md) — when the HTTPS Git remote rejects stale credentials, use the installed GitHub connection to publish the commit safely.
+- [Album completion status](album-transfer-completion.md) — force the final progress update and avoid expensive custom thumbnails for very large videos.
