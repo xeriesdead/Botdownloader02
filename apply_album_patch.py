@@ -14,6 +14,19 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 text = PATH.read_text(encoding="utf-8")
 
+if "async def _safe_create_video_thumbnail_async(" in text:
+    raise SystemExit("Helper thumbnail sudah ada; file tidak diubah.")
+
+# Ambil seluruh pemanggilan asli sebelum helper ditambahkan. Dengan begitu,
+# pemanggilan internal helper tidak ikut terganti menjadi rekursif.
+old_thumbnail = "await _create_video_thumbnail_async(path)"
+thumbnail_count = text.count(old_thumbnail)
+if thumbnail_count != 3:
+    raise SystemExit(
+        "Pemanggilan thumbnail: expected exactly 3 original matches, "
+        f"found {thumbnail_count}; no changes ditulis."
+    )
+
 helper_marker = "\n\ndef _video_metadata(msg) -> dict:\n"
 helper = '''
 
@@ -38,9 +51,6 @@ async def _safe_create_video_thumbnail_async(
         logger.exception("Gagal membuat thumbnail: %s", path)
         return None
 '''
-
-if "async def _safe_create_video_thumbnail_async(" in text:
-    raise SystemExit("Helper thumbnail sudah ada; file tidak diubah.")
 text = replace_once(
     text,
     helper_marker,
@@ -48,17 +58,12 @@ text = replace_once(
     "marker helper thumbnail",
 )
 
-# Terapkan hanya pada pemanggilan thumbnail yang ada setelah helper; helper
-# sendiri tetap memanggil fungsi asli.
-old_thumbnail = "await _create_video_thumbnail_async(path)"
-new_thumbnail = "await _safe_create_video_thumbnail_async(path)"
-thumbnail_count = text.count(old_thumbnail)
-if thumbnail_count != 3:
-    raise SystemExit(
-        "Pemanggilan thumbnail: expected exactly 3 matches, "
-        f"found {thumbnail_count}; no changes written."
-    )
-text = text.replace(old_thumbnail, new_thumbnail)
+# Ganti hanya pemanggilan di luar helper, yang berada setelah helper.
+helper_end = text.index(helper_marker)
+head = text[:helper_end]
+tail = text[helper_end:]
+tail = tail.replace(old_thumbnail, "await _safe_create_video_thumbnail_async(path)")
+text = head + tail
 
 album_marker = '''        for i, m in enumerate(msgs):
             file_size = _get_file_size(m) or 0
