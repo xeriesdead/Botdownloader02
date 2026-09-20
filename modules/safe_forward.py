@@ -76,6 +76,10 @@ _PROGRESS_MIN_BYTES = 10 * 1024 * 1024
 # setelah pembukaan video agar thumbnail tidak sering berupa frame hitam.
 _THUMBNAIL_MAX_SECONDS = 5.0
 _THUMBNAIL_MAX_BYTES = 200 * 1024
+# Untuk video sangat besar, biarkan Telegram membuat preview-nya sendiri.
+# Menjalankan ffmpeg terhadap file ratusan MB dapat terlihat seperti download
+# berhenti walaupun transfer sebenarnya sudah selesai.
+_THUMBNAIL_MAX_VIDEO_BYTES = 200 * 1024 * 1024
 
 
 # ââ Helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
@@ -136,7 +140,11 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
         pct = int(current * 100 / total)
         if (
             current == state["last_current"]
-            or (now - state["last_time"] < 3.0 and pct - state["last_pct"] < 10)
+            or (
+                current < total
+                and now - state["last_time"] < 3.0
+                and pct - state["last_pct"] < 10
+            )
         ):
             return
         state["last_time"] = now
@@ -344,17 +352,22 @@ async def _run_transfer_with_watchdog(
     """
     last_progress_at = time.monotonic()
     last_position = None
+    last_total = None
+    progress_task = None
 
     async def _progress(current: int, total: int):
-        nonlocal last_progress_at, last_position
+        nonlocal last_progress_at, last_position, last_total, progress_task
         if current != last_position:
             last_position = current
             last_progress_at = time.monotonic()
-        if progress:
-            try:
-                await progress(current, total)
-            except Exception:
-                pass
+        last_total = total
+        if progress and (
+            progress_task is None or progress_task.done()
+        ):
+            # Callback Pyrogram tidak boleh menunggu Telegram edit_message.
+            # Jika edit lambat, menunggunya di sini ikut menahan transfer.
+            progress_task = asyncio.create_task(progress(current, total))
+            progress_task.add_done_callback(_consume_cancelled_task)
 
     task = asyncio.ensure_future(factory(_progress))
     started_at = time.monotonic()
@@ -379,12 +392,29 @@ async def _run_transfer_with_watchdog(
                 task.cancel()
                 task.add_done_callback(_consume_cancelled_task)
                 raise asyncio.TimeoutError(f"{operation} timeout")
-        return task.result()
+        result = task.result()
+
+        # Debounce boleh membuang callback terakhir jika 98% baru saja dikirim.
+        # Paksa satu update final agar status tidak tertinggal di 98%.
+        if progress and last_total:
+            if progress_task is not None and not progress_task.done():
+                progress_task.cancel()
+                await asyncio.gather(progress_task, return_exceptions=True)
+            progress_task = None
+            try:
+                await progress(last_total, last_total)
+            except Exception:
+                pass
+        return result
     except BaseException:
         if not task.done():
             task.cancel()
             task.add_done_callback(_consume_cancelled_task)
         raise
+    finally:
+        if progress_task is not None and not progress_task.done():
+            progress_task.cancel()
+            progress_task.add_done_callback(_consume_cancelled_task)
 
 
 async def _download_media(
@@ -896,6 +926,11 @@ def _create_video_thumbnail(path: str) -> str | None:
 
 async def _create_video_thumbnail_async(path: str) -> str | None:
     """Jalankan FFmpeg di thread agar event loop bot tidak terblokir."""
+    try:
+        if os.path.getsize(path) > _THUMBNAIL_MAX_VIDEO_BYTES:
+            return None
+    except OSError:
+        return None
     return await asyncio.to_thread(_create_video_thumbnail, path)
 
 
@@ -1172,6 +1207,11 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             paths.append(path)
             download_dirs.append(item_dir)
 
+            await _notify_progress(
+                on_progress,
+                f"✅ <b>Media {i + 1}/{total} selesai diunduh.</b>\n"
+                "<i>Menyiapkan media berikutnya...</i>",
+            )
             caption = _build_caption(m.caption or "") if i == 0 else ""
             f       = open(path, "rb")  # noqa: WPS515 â ditutup di finally
             handles.append(f)
