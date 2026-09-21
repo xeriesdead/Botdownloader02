@@ -178,9 +178,10 @@ def _make_pyrogram_progress(on_progress, phase: str, total_size: int):
         try:
             # Progress hanya informasi tambahan. Jika Telegram lambat saat
             # mengedit pesan status, transfer Pyrogram tetap berjalan.
-            await asyncio.wait_for(
+            await _hard_timeout(
                 on_progress(text),
                 timeout=_PROGRESS_CALLBACK_TIMEOUT,
+                operation="progress callback",
             )
         except Exception:
             pass
@@ -269,9 +270,10 @@ async def _notify_progress(on_progress, text: str):
     if not on_progress:
         return
     try:
-        await asyncio.wait_for(
+        await _hard_timeout(
             on_progress(text),
             timeout=_PROGRESS_CALLBACK_TIMEOUT,
+            operation="progress update",
         )
     except Exception:
         pass

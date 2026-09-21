@@ -14,3 +14,9 @@ Album status is emitted immediately after the file download and before video thu
 **Why:** Thumbnail extraction is post-download work but appears under the same user-facing preparation message.
 
 **How to apply:** Keep thumbnail extraction bounded and continue without a custom thumbnail when it exceeds its deadline; clean up any late thread result.
+
+Progress callbacks need the same hard timeout as media operations; `asyncio.wait_for()` can remain stuck while waiting for a slow Telegram edit to cancel even after the edit text is visible.
+
+**Why:** A status update can reach Telegram while its client coroutine is still unwinding, making the album appear frozen at the last visible progress message.
+
+**How to apply:** Use a task-based hard timeout for status/progress callbacks, cancel without awaiting a potentially stuck callback, and consume its eventual result.
