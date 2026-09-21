@@ -8,3 +8,9 @@ Large album downloads can finish while the visible status remains at 98%: the pr
 **Why:** Telegram transfer callbacks and status-message edits are separate operations; a stale progress message does not prove that the transfer is still downloading.
 
 **How to apply:** Always allow an explicit final progress update, keep status callbacks from blocking the transfer callback, and skip custom ffmpeg thumbnails for very large videos so Telegram can generate the preview.
+
+Album status is emitted immediately after the file download and before video thumbnail preparation, so a status such as “media 5/10 selesai diunduh” can indicate a thumbnail stall rather than a download stall.
+
+**Why:** Thumbnail extraction is post-download work but appears under the same user-facing preparation message.
+
+**How to apply:** Keep thumbnail extraction bounded and continue without a custom thumbnail when it exceeds its deadline; clean up any late thread result.

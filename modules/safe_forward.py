@@ -80,6 +80,7 @@ _THUMBNAIL_MAX_BYTES = 200 * 1024
 # Menjalankan ffmpeg terhadap file ratusan MB dapat terlihat seperti download
 # berhenti walaupun transfer sebenarnya sudah selesai.
 _THUMBNAIL_MAX_VIDEO_BYTES = 200 * 1024 * 1024
+_THUMBNAIL_TIMEOUT = 20  # detik — thumbnail tidak boleh menahan transfer album
 
 
 # ââ Helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
@@ -934,6 +935,57 @@ async def _create_video_thumbnail_async(path: str) -> str | None:
     return await asyncio.to_thread(_create_video_thumbnail, path)
 
 
+def _cleanup_thumbnail_task(task: asyncio.Task):
+    """Hapus thumbnail jika task yang dibatasi waktu selesai belakangan."""
+    try:
+        thumbnail_path = task.result()
+    except BaseException:
+        return
+    if thumbnail_path:
+        try:
+            os.remove(thumbnail_path)
+        except OSError:
+            pass
+
+
+async def _safe_create_video_thumbnail_async(
+    path: str, timeout_seconds: int = _THUMBNAIL_TIMEOUT,
+) -> str | None:
+    """
+    Buat thumbnail dengan batas waktu yang tegas.
+
+    `asyncio.to_thread()` tidak dapat menghentikan proses ffmpeg yang sedang
+    berjalan ketika coroutine dibatalkan. Shield task agar timeout segera
+    mengembalikan alur album, lalu bersihkan hasilnya jika thread selesai nanti.
+    """
+    task = asyncio.create_task(_create_video_thumbnail_async(path))
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(task),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Thumbnail video timeout untuk %s setelah %ss; lanjut tanpa thumbnail.",
+            path,
+            timeout_seconds,
+        )
+        if task.done():
+            _cleanup_thumbnail_task(task)
+        else:
+            task.add_done_callback(_cleanup_thumbnail_task)
+        return None
+    except asyncio.CancelledError:
+        if task.done():
+            _cleanup_thumbnail_task(task)
+        else:
+            task.add_done_callback(_cleanup_thumbnail_task)
+        raise
+    except Exception as exc:
+        logger.warning("Thumbnail video gagal untuk %s: %s", path, exc)
+        return None
+
+
 def _video_metadata(msg) -> dict:
     """Ambil metadata video dari pesan sumber untuk preview Telegram."""
     video = getattr(msg, "video", None)
@@ -1219,7 +1271,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             if m.photo:
                 media_item = InputMediaPhoto(media=f, caption=caption)
             elif m.video:
-                thumbnail_path = await _create_video_thumbnail_async(path)
+                thumbnail_path = await _safe_create_video_thumbnail_async(path)
                 thumbnail_handle = None
                 if thumbnail_path:
                     try:
@@ -1588,7 +1640,7 @@ async def _send_album_item(
     # Thumbnail dibuat untuk video, tetapi kegagalannya tidak boleh membatalkan
     # jalur fallback pengiriman media.
     thumbnail_path = (
-        await _create_video_thumbnail_async(path)
+        await _safe_create_video_thumbnail_async(path)
         if msg.video else None
     )
     metadata = _video_metadata(msg)
