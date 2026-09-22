@@ -850,6 +850,13 @@ def setup(app):
             pmsg_id = pmsg.message_id
 
             async def _edit_b(text: str):
+                status_started_at = time.monotonic()
+                logger.info(
+                    "[telegram-status] edit start uid=%s message=%s text=%s",
+                    uid,
+                    pmsg_id,
+                    text.splitlines()[0][:120],
+                )
                 try:
                     await asyncio.wait_for(
                         bot.edit_message_text(
@@ -863,8 +870,20 @@ def setup(app):
                         ),
                         timeout=15,
                     )
+                    logger.info(
+                        "[telegram-status] edit returned uid=%s message=%s elapsed=%.1fs",
+                        uid,
+                        pmsg_id,
+                        time.monotonic() - status_started_at,
+                    )
                 except Exception:
-                    pass
+                    logger.warning(
+                        "[telegram-status] edit failed/timeout uid=%s message=%s "
+                        "elapsed=%.1fs",
+                        uid,
+                        pmsg_id,
+                        time.monotonic() - status_started_at,
+                    )
 
             last_progress = [time.monotonic()]
 
@@ -904,6 +923,13 @@ def setup(app):
 
                         async def _progress(text: str):
                             last_progress[0] = time.monotonic()
+                            logger.info(
+                                "[telegram-status] progress callback uid=%s "
+                                "message=%s text=%s",
+                                uid,
+                                pmsg_id,
+                                text.splitlines()[0][:120],
+                            )
                             await _edit_b(text)
 
                         # Fetch semua pesan sekaligus

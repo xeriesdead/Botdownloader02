@@ -357,12 +357,22 @@ async def _run_transfer_with_watchdog(
     last_position = None
     last_total = None
     progress_task = None
+    first_progress_logged = False
 
     async def _progress(current: int, total: int):
-        nonlocal last_progress_at, last_position, last_total, progress_task
+        nonlocal last_progress_at, last_position, last_total
+        nonlocal progress_task, first_progress_logged
         if current != last_position:
             last_position = current
             last_progress_at = time.monotonic()
+            if not first_progress_logged:
+                first_progress_logged = True
+                logger.info(
+                    "[transfer] first progress operation=%s current=%s total=%s",
+                    operation,
+                    current,
+                    total,
+                )
         last_total = total
         if progress and (
             progress_task is None or progress_task.done()
@@ -372,6 +382,7 @@ async def _run_transfer_with_watchdog(
             progress_task = asyncio.create_task(progress(current, total))
             progress_task.add_done_callback(_consume_cancelled_task)
 
+    logger.info("[transfer] start operation=%s timeout=%ss", operation, timeout)
     task = asyncio.ensure_future(factory(_progress))
     started_at = time.monotonic()
     try:
@@ -396,6 +407,13 @@ async def _run_transfer_with_watchdog(
                 task.add_done_callback(_consume_cancelled_task)
                 raise asyncio.TimeoutError(f"{operation} timeout")
         result = task.result()
+        logger.info(
+            "[transfer] task completed operation=%s position=%s total=%s result=%s",
+            operation,
+            last_position,
+            last_total,
+            bool(result),
+        )
 
         # Debounce boleh membuang callback terakhir jika 98% baru saja dikirim.
         # Paksa satu update final agar status tidak tertinggal di 98%.
@@ -1215,6 +1233,16 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             file_size = _get_file_size(m) or 0
             # Timeout dinamis: min 60 detik, +30 detik per 10 MB
             dl_timeout = max(60, 30 + (file_size // (10 * 1024 * 1024)) * 30)
+            logger.info(
+                "[album] item start index=%s/%s msg=%s size=%s timeout=%ss "
+                "media=%s",
+                i + 1,
+                total,
+                getattr(m, "id", "?"),
+                file_size,
+                dl_timeout,
+                type(getattr(m, "media", None)).__name__,
+            )
             # Callback progress per-file (hanya untuk file â¥ PROGRESS_MIN_BYTES)
             dl_cb = None
             if on_progress and file_size >= _PROGRESS_MIN_BYTES:
@@ -1232,6 +1260,13 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             item_dir = _new_download_dir(user_chat_id)
             for _dl_attempt in range(2):
                 try:
+                    logger.info(
+                        "[album] download start index=%s/%s msg=%s attempt=%s",
+                        i + 1,
+                        total,
+                        getattr(m, "id", "?"),
+                        _dl_attempt + 1,
+                    )
                     path = await _download_media(
                         client,
                         m,
@@ -1240,7 +1275,23 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                         operation=f"download album item {i + 1}/{total}",
                         progress=dl_cb,
                     )
+                    logger.info(
+                        "[album] download returned index=%s/%s msg=%s attempt=%s "
+                        "path=%s",
+                        i + 1,
+                        total,
+                        getattr(m, "id", "?"),
+                        _dl_attempt + 1,
+                        path,
+                    )
                     if path and os.path.isfile(path) and os.path.getsize(path) > 0:
+                        logger.info(
+                            "[album] download validated index=%s/%s msg=%s bytes=%s",
+                            i + 1,
+                            total,
+                            getattr(m, "id", "?"),
+                            os.path.getsize(path),
+                        )
                         break
                     path = None
                 except (asyncio.TimeoutError, Exception) as _dl_err:
@@ -1266,6 +1317,12 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 f"✅ <b>Media {i + 1}/{total} selesai diunduh.</b>\n"
                 "<i>Menyiapkan media berikutnya...</i>",
             )
+            logger.info(
+                "[album] completion status returned index=%s/%s msg=%s",
+                i + 1,
+                total,
+                getattr(m, "id", "?"),
+            )
             caption = _build_caption(m.caption or "") if i == 0 else ""
             f       = open(path, "rb")  # noqa: WPS515 â ditutup di finally
             handles.append(f)
@@ -1273,7 +1330,21 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
             if m.photo:
                 media_item = InputMediaPhoto(media=f, caption=caption)
             elif m.video:
+                logger.info(
+                    "[album] thumbnail start index=%s/%s msg=%s path=%s",
+                    i + 1,
+                    total,
+                    getattr(m, "id", "?"),
+                    path,
+                )
                 thumbnail_path = await _safe_create_video_thumbnail_async(path)
+                logger.info(
+                    "[album] thumbnail returned index=%s/%s msg=%s available=%s",
+                    i + 1,
+                    total,
+                    getattr(m, "id", "?"),
+                    bool(thumbnail_path),
+                )
                 thumbnail_handle = None
                 if thumbnail_path:
                     try:
@@ -1307,6 +1378,13 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
 
             downloaded_items.append(
                 (m, path, media_item, _album_media_kind(m))
+            )
+            logger.info(
+                "[album] item prepared index=%s/%s msg=%s kind=%s",
+                i + 1,
+                total,
+                getattr(m, "id", "?"),
+                _album_media_kind(m),
             )
 
         if len(downloaded_items) != total:
