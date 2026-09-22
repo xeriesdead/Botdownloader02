@@ -2,6 +2,7 @@ import asyncio
 import os
 import time
 import unittest
+from types import SimpleNamespace
 
 
 # safe_forward imports the application configuration at module import time.
@@ -14,6 +15,29 @@ from modules import safe_forward
 
 
 class SafeForwardProgressTests(unittest.TestCase):
+    def test_album_strategy_keeps_small_photo_album_as_group(self):
+        small_photo = SimpleNamespace(
+            photo=SimpleNamespace(file_size=5 * 1024 * 1024),
+        )
+        messages = [small_photo for _ in range(10)]
+
+        self.assertFalse(safe_forward._should_stream_album(messages))
+
+    def test_album_strategy_streams_when_one_file_is_large(self):
+        large_video = SimpleNamespace(
+            video=SimpleNamespace(file_size=51 * 1024 * 1024),
+        )
+
+        self.assertTrue(safe_forward._should_stream_album([large_video]))
+
+    def test_album_strategy_streams_when_total_size_is_large(self):
+        medium_photo = SimpleNamespace(
+            photo=SimpleNamespace(file_size=20 * 1024 * 1024),
+        )
+        messages = [medium_photo for _ in range(8)]
+
+        self.assertTrue(safe_forward._should_stream_album(messages))
+
     def test_stuck_progress_callback_does_not_block_album_transition(self):
         async def stubborn_progress(_text):
             try:

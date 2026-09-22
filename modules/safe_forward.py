@@ -42,6 +42,11 @@ FLOOD_LIMIT = 60
 
 # Batas upload ulang via Bot API (file di atas ini tidak bisa di-re-upload oleh bot)
 _BOT_API_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
+# Album besar diproses satu per satu agar file sementara tidak menumpuk
+# sampai seluruh album selesai diunduh. Album kecil tetap dikirim sebagai
+# media group untuk mempertahankan tampilan album Telegram.
+_ALBUM_STREAM_FILE_LIMIT = 50 * 1024 * 1024
+_ALBUM_STREAM_TOTAL_LIMIT = 150 * 1024 * 1024
 
 # Username bot â diset sekali saat startup via set_bot_username()
 _BOT_USERNAME: str = ""
@@ -1160,6 +1165,17 @@ def _album_media_kind(message) -> str | None:
     return None
 
 
+def _should_stream_album(messages) -> bool:
+    """Pilih jalur hemat storage untuk album dengan media besar."""
+    known_sizes = [_get_file_size(message) or 0 for message in messages]
+    if not known_sizes:
+        return False
+    return (
+        max(known_sizes) > _ALBUM_STREAM_FILE_LIMIT
+        or sum(known_sizes) > _ALBUM_STREAM_TOTAL_LIMIT
+    )
+
+
 def _album_batches(items: list[tuple]) -> list[list[tuple]]:
     """
     Split downloaded items into Telegram-compatible media groups.
@@ -1885,13 +1901,160 @@ async def _send_album_item(
                 pass
 
 
+async def _send_album_streaming_individually(
+    client, bot, messages, user_chat_id: int,
+    on_progress=None, is_premium: bool = False,
+) -> tuple[bool, str | None]:
+    """
+    Jalur hemat storage untuk album besar:
+    download satu item, upload, lalu hapus file sementaranya sebelum lanjut.
+    """
+    total = len(messages)
+    size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
+    size_label = (
+        f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
+        if is_premium else f"{MAX_FILE_SIZE_MB} MB"
+    )
+    oversized = [
+        _get_file_size(message) for message in messages
+        if _get_file_size(message) and _get_file_size(message) > size_limit
+    ]
+    if oversized:
+        return False, (
+            f"Album memiliki media terlalu besar ({_fmt_size(max(oversized))}). "
+            f"Batas maksimal: {size_label}."
+        )
+
+    sent = 0
+    failed = 0
+    for index, message in enumerate(messages, 1):
+        file_size = _get_file_size(message) or 0
+        dl_timeout = max(60, 30 + (file_size // (10 * 1024 * 1024)) * 30)
+        dl_cb = None
+        if on_progress and file_size >= _PROGRESS_MIN_BYTES:
+            dl_cb = _make_pyrogram_progress(
+                on_progress,
+                f"Mengunduh ({index}/{total})",
+                file_size,
+            )
+        elif on_progress:
+            await _notify_progress(
+                on_progress,
+                f"📥 <b>Mengunduh album besar...</b> ({index}/{total})",
+            )
+
+        item_dir = _new_download_dir(user_chat_id)
+        path = None
+        try:
+            for download_attempt in range(2):
+                try:
+                    logger.info(
+                        "[album-stream] download start index=%s/%s msg=%s "
+                        "attempt=%s size=%s",
+                        index,
+                        total,
+                        getattr(message, "id", "?"),
+                        download_attempt + 1,
+                        file_size,
+                    )
+                    path = await _download_media(
+                        client,
+                        message,
+                        file_name=item_dir,
+                        timeout=dl_timeout,
+                        operation=f"download streaming album item {index}/{total}",
+                        progress=dl_cb,
+                    )
+                    if path and os.path.isfile(path) and os.path.getsize(path) > 0:
+                        logger.info(
+                            "[album-stream] download validated index=%s/%s "
+                            "msg=%s bytes=%s",
+                            index,
+                            total,
+                            getattr(message, "id", "?"),
+                            os.path.getsize(path),
+                        )
+                        break
+                    path = None
+                except (asyncio.TimeoutError, Exception) as download_error:
+                    logger.warning(
+                        "Download streaming album item %s msg %s attempt %s gagal: %s",
+                        index,
+                        getattr(message, "id", "?"),
+                        download_attempt + 1,
+                        download_error,
+                    )
+                    if download_attempt == 0:
+                        await asyncio.sleep(2)
+
+            if not path:
+                failed += 1
+                logger.error(
+                    "[album-stream] download failed index=%s/%s msg=%s",
+                    index,
+                    total,
+                    getattr(message, "id", "?"),
+                )
+                continue
+
+            await _notify_progress(
+                on_progress,
+                f"📤 <b>Mengirim media besar...</b> ({index}/{total})",
+            )
+            item_sent = False
+            for send_attempt in range(2):
+                try:
+                    await _send_album_item(
+                        client,
+                        bot,
+                        message,
+                        path,
+                        user_chat_id,
+                        on_progress=on_progress,
+                    )
+                    item_sent = True
+                    sent += 1
+                    logger.info(
+                        "[album-stream] item sent index=%s/%s msg=%s",
+                        index,
+                        total,
+                        getattr(message, "id", "?"),
+                    )
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as send_error:
+                    logger.warning(
+                        "Gagal mengirim streaming album item %s msg %s "
+                        "attempt %s: %s",
+                        index,
+                        getattr(message, "id", "?"),
+                        send_attempt + 1,
+                        send_error,
+                    )
+                    if send_attempt == 0:
+                        await asyncio.sleep(2)
+            if not item_sent:
+                failed += 1
+        finally:
+            # Hapus file item ini sebelum download item berikutnya dimulai.
+            shutil.rmtree(item_dir, ignore_errors=True)
+
+    if sent == 0:
+        return False, "Semua file dalam album gagal dikirim."
+    if failed:
+        return False, f"Album hanya terkirim {sent}/{total} media."
+    return True, None
+
+
 async def _send_album_individually(
     client, bot, chat, msg_id: int, user_chat_id: int,
     on_progress=None, is_premium: bool = False, messages=None,
 ) -> tuple[bool, str | None]:
     """
-    Fallback album: download semua file lalu coba kirim sebagai album (send_media_group).
-    Jika album gagal (misal file terlalu besar / error PTB), kirim satu per satu.
+    Fallback album untuk kondisi ketika jalur group gagal.
+    Album besar dialihkan ke streaming; album kecil didownload lalu dikirim
+    satu per satu.
     TIDAK menggunakan copy/forward â semua file didownload fresh agar bypass restriction.
     on_progress: async callable(text: str) untuk update status (opsional).
     """
@@ -1921,6 +2084,21 @@ async def _send_album_individually(
         return False, (
             f"Album memiliki media terlalu besar ({_fmt_size(max(oversized))}). "
             f"Batas maksimal: {size_label}."
+        )
+
+    if _should_stream_album(msgs):
+        logger.info(
+            "[album] fallback large album -> streaming download/upload "
+            "(%s items)",
+            len(msgs),
+        )
+        return await _send_album_streaming_individually(
+            client,
+            bot,
+            msgs,
+            user_chat_id,
+            on_progress=on_progress,
+            is_premium=is_premium,
         )
 
     # Download semua file terlebih dahulu
@@ -2227,7 +2405,7 @@ class SafeForward:
         Strategi pengiriman:
           0. Deteksi noforwards (has_protected_content) â jika aktif, langsung ke (2)
           1. send_media_group via PTB (download Pyrogram + upload bot, tanpa forward)
-          2. Jika gagal / restricted: _send_album_individually (download fresh + send_media_group)
+          2. Album besar: download dan upload satu per satu agar storage tetap rendah
           3. Fallback terakhir: kirim file satu per satu jika send_media_group masih gagal
 
         on_progress: async callable(text: str) untuk update status (opsional).
@@ -2272,7 +2450,19 @@ class SafeForward:
                     for message in album_messages
                 )
                 if is_restricted:
-                    return await _send_album_individually(
+                    if _should_stream_album(album_messages):
+                        logger.info(
+                            "[album] large restricted album -> streaming "
+                            "download/upload (%s items)",
+                            len(album_messages),
+                        )
+                        return await _send_album_streaming_individually(
+                            client, bot, album_messages, user_chat_id,
+                            on_progress=on_progress, is_premium=is_premium,
+                        )
+                    # Album kecil tetap dikirim sebagai media group setelah
+                    # di-download agar tampilan album Telegram dipertahankan.
+                    return await _send_album_via_bot(
                         client, bot, source_chat, msg_id, user_chat_id,
                         on_progress=on_progress, is_premium=is_premium,
                         messages=album_messages,
@@ -2287,6 +2477,17 @@ class SafeForward:
                     )
                     if copied_result is not None:
                         return copied_result
+
+                if _should_stream_album(album_messages):
+                    logger.info(
+                        "[album] large album -> streaming download/upload "
+                        "(%s items)",
+                        len(album_messages),
+                    )
+                    return await _send_album_streaming_individually(
+                        client, bot, album_messages, user_chat_id,
+                        on_progress=on_progress, is_premium=is_premium,
+                    )
 
                 album_result = await _send_album_via_bot(
                     client, bot, source_chat, msg_id, user_chat_id,
