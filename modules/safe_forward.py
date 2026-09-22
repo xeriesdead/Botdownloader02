@@ -81,10 +81,13 @@ _PROGRESS_MIN_BYTES = 10 * 1024 * 1024
 # setelah pembukaan video agar thumbnail tidak sering berupa frame hitam.
 _THUMBNAIL_MAX_SECONDS = 5.0
 _THUMBNAIL_MAX_BYTES = 200 * 1024
-# Untuk video sangat besar, biarkan Telegram membuat preview-nya sendiri.
-# Menjalankan ffmpeg terhadap file ratusan MB dapat terlihat seperti download
-# berhenti walaupun transfer sebenarnya sudah selesai.
-_THUMBNAIL_MAX_VIDEO_BYTES = 200 * 1024 * 1024
+# Tetap coba buat thumbnail untuk seluruh ukuran video yang diizinkan aplikasi.
+# FFmpeg hanya mengambil satu frame dan tetap dibatasi oleh timeout thumbnail;
+# jangan sengaja menghilangkan thumbnail hanya karena video melewati 200 MB.
+_THUMBNAIL_MAX_VIDEO_BYTES = max(
+    MAX_FILE_SIZE_BYTES,
+    MAX_FILE_SIZE_BYTES_PREMIUM,
+)
 _THUMBNAIL_TIMEOUT = 20  # detik — thumbnail tidak boleh menahan transfer album
 
 
