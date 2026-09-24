@@ -991,7 +991,7 @@ def _instaloader_sync(url: str, work_dir: str) -> tuple[str, list[str]]:
             save_metadata=False,
             post_metadata_txt_pattern="",
             dirname_pattern=work_dir,
-            filename_pattern="{shortcode}_{media_number:02}",
+            filename_pattern="{shortcode}",
         )
 
         try:

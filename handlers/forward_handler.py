@@ -1,6 +1,7 @@
 import time
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from html import escape
 from telegram.ext import CommandHandler, CallbackQueryHandler
 from telegram.constants import ParseMode
@@ -85,6 +86,23 @@ def _get_lock(uid: int) -> asyncio.Lock:
     if uid not in _user_locks:
         _user_locks[uid] = asyncio.Lock()
     return _user_locks[uid]
+
+
+@asynccontextmanager
+async def _get_lock_with_timeout(uid: int, timeout: int = 60):
+    lock = _get_lock(uid)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise ValueError(
+            "❌ Download masih menunggu proses kamu sebelumnya lebih dari 60 detik.\n"
+            "Quota sudah dikembalikan. Tunggu proses sebelumnya selesai lalu coba lagi."
+        ) from exc
+
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _check_rate(uid: int) -> bool:
@@ -187,8 +205,17 @@ def setup(app):
                     quota_refunded = True
 
             try:
-                async with _get_lock(uid):
+                lock = _get_lock(uid)
+                logger.info(
+                    "[social] job picked up uid=%s user_lock_busy=%s",
+                    uid,
+                    lock.locked(),
+                )
+                if lock.locked():
+                    await edit("⏳ Menunggu download kamu sebelumnya selesai...")
+                async with _get_lock_with_timeout(uid):
                     _bulk_cancel[uid] = False
+                    logger.info("[social] user lock acquired uid=%s; starting extraction", uid)
                     await edit("🔍 Menganalisis link media sosial...")
                     title, files, work_dir = await download_public_media(url, uid)
 
@@ -382,7 +409,8 @@ def setup(app):
             )
         else:
             await edit(
-                f"⏳ <b>Download dimulai...</b>\n"
+                f"📋 <b>Masuk antrian!</b>\n"
+                f"Posisi kamu: <b>ke-1</b> (giliran berikutnya)\n"
                 f"📦 Sisa quota: <b>{quota_display}</b>"
             )
 
