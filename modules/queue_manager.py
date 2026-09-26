@@ -107,7 +107,11 @@ class QueueManager:
         # Append tracking hanya setelah enqueue berhasil
         if user_id:
             track.append(user_id)
-        return len(track)  # posisi 1-based
+        # Worker aktif sudah memegang giliran di depan job baru, tetapi
+        # user_id job aktif sudah dikeluarkan dari tracking list. Sertakan
+        # active_count agar posisi yang tampil tidak menipu (ke-1 padahal
+        # masih menunggu transfer aktif selesai).
+        return self._active_count + len(track)  # posisi 1-based
 
     def get_position(self, user_id: int, is_premium: bool = False) -> int:
         """

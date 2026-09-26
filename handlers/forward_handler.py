@@ -79,7 +79,9 @@ _SINGLE_JOB_TIMEOUT = max(
     60,
     JOB_TIMEOUT - _SESSION_LOOKUP_TIMEOUT - _LOCK_WAIT_TIMEOUT - 5,
 )
-_SINGLE_JOB_TIMEOUT_PREMIUM = 2 * 60 * 60
+# Satu worker dipakai untuk menjaga RAM Railway. Jangan biarkan satu transfer
+# yang macet menahan semua job berikutnya selama dua jam.
+_SINGLE_JOB_TIMEOUT_PREMIUM = 20 * 60
 
 
 def _get_lock(uid: int) -> asyncio.Lock:
