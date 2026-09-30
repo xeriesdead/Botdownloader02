@@ -1,7 +1,8 @@
 import asyncio
 from datetime import date, datetime, timezone, timedelta
 
-from telegram.ext import CommandHandler
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CallbackQueryHandler, CommandHandler
 from telegram.constants import ParseMode
 
 # ── Timezone helper ───────────────────────────────────────────────────────────
@@ -515,37 +516,13 @@ def setup(app):
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
     # ── /recentactivity [YYYY-MM-DD] [halaman] ────────────────────────────
-    @admin_only
-    async def recent_activity(update, context):
+    def _recent_activity_page(filter_date: str, page: int, owner_id: int):
         page_size = 15
-        today = _today_wib()
-        args = context.args or []
-        filter_date = today
-        page = 1
-
-        if len(args) == 1 and args[0].isdigit():
-            page = int(args[0])
-        elif args:
-            filter_date = args[0]
-            if len(args) > 1:
-                try:
-                    page = int(args[1])
-                except ValueError:
-                    return await update.message.reply_text(
-                        "Format: <code>/recentactivity [YYYY-MM-DD] [halaman]</code>",
-                        parse_mode=ParseMode.HTML,
-                    )
-            if len(args) > 2:
-                return await update.message.reply_text(
-                    "Format: <code>/recentactivity [YYYY-MM-DD] [halaman]</code>",
-                    parse_mode=ParseMode.HTML,
-                )
-
         total = count_recent_activity(date=filter_date)
         if not total:
-            return await update.message.reply_text(
+            return (
                 f"📭 Tidak ada aktivitas pada <b>{filter_date}</b> (WIB).",
-                parse_mode=ParseMode.HTML,
+                None,
             )
 
         total_pages = max(1, (total + page_size - 1) // page_size)
@@ -575,17 +552,84 @@ def setup(app):
             detail = f" <code>{r['detail']}</code>" if r["detail"] else ""
             lines.append(f"{icon} <b>{waktu}</b> {uname} — {r['event_type']}{detail}")
 
-        def page_command(target_page: int) -> str:
-            if filter_date == today:
-                return f"/recentactivity {target_page}"
-            return f"/recentactivity {filter_date} {target_page}"
-
+        buttons = []
+        callback_prefix = f"recentactivity:{owner_id}:{filter_date}:"
         if page > 1:
-            lines.append(f"\n<i>Halaman sebelumnya: {page_command(page - 1)}</i>")
+            buttons.append(
+                InlineKeyboardButton(
+                    "⬅️ Sebelumnya",
+                    callback_data=f"{callback_prefix}{page - 1}",
+                )
+            )
         if page < total_pages:
-            lines.append(f"\n<i>Halaman berikutnya: {page_command(page + 1)}</i>")
+            buttons.append(
+                InlineKeyboardButton(
+                    "Berikutnya ➡️",
+                    callback_data=f"{callback_prefix}{page + 1}",
+                )
+            )
+        keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
+        return "\n".join(lines), keyboard
 
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    @admin_only
+    async def recent_activity(update, context):
+        today = _today_wib()
+        args = context.args or []
+        filter_date = today
+        page = 1
+
+        if len(args) == 1 and args[0].isdigit():
+            page = int(args[0])
+        elif args:
+            filter_date = args[0]
+            if len(args) > 1:
+                try:
+                    page = int(args[1])
+                except ValueError:
+                    return await update.message.reply_text(
+                        "Format: <code>/recentactivity [YYYY-MM-DD] [halaman]</code>",
+                        parse_mode=ParseMode.HTML,
+                    )
+            if len(args) > 2:
+                return await update.message.reply_text(
+                    "Format: <code>/recentactivity [YYYY-MM-DD] [halaman]</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+
+        text, keyboard = _recent_activity_page(
+            filter_date, page, update.effective_user.id
+        )
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+
+    async def recent_activity_page(update, context):
+        query = update.callback_query
+        if not is_admin(query.from_user.id):
+            return await query.answer("❌ Kamu bukan admin.", show_alert=True)
+
+        try:
+            _, owner_id, filter_date, page = query.data.split(":", 3)
+            owner_id = int(owner_id)
+            page = int(page)
+            date.fromisoformat(filter_date)
+            if owner_id != query.from_user.id or page < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            return await query.answer(
+                "Tombol halaman tidak valid atau sudah kedaluwarsa.",
+                show_alert=True,
+            )
+
+        await query.answer()
+        text, keyboard = _recent_activity_page(filter_date, page, owner_id)
+        await query.edit_message_text(
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
 
     # ── /topdownloaders [YYYY-MM-DD] ─────────────────────────────────────
     @admin_only
@@ -682,6 +726,12 @@ def setup(app):
 
     app.add_handler(CommandHandler("activity",        activity))
     app.add_handler(CommandHandler("recentactivity",  recent_activity))
+    app.add_handler(
+        CallbackQueryHandler(
+            recent_activity_page,
+            pattern=r"^recentactivity:\d+:\d{4}-\d{2}-\d{2}:\d+$",
+        )
+    )
     app.add_handler(CommandHandler("topdownloaders",  top_downloaders))
     app.add_handler(CommandHandler("bulkaddquota",    bulk_add_quota))
     app.add_handler(CommandHandler("bulkpremium",   bulk_premium))
