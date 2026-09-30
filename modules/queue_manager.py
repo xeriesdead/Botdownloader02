@@ -20,6 +20,8 @@ class QueueManager:
         # Daftar user_id dalam antrian (urutan masuk → bisa cek posisi)
         self._regular_tracking: list[int] = []
         self._premium_tracking: list[int] = []
+        self._regular_position_callbacks: list = []
+        self._premium_position_callbacks: list = []
 
     async def _worker(self):
         premium_counter = 0
@@ -85,7 +87,27 @@ class QueueManager:
             return not self.premium_queue.full()
         return not self.regular_queue.full()
 
-    def add_job(self, job, is_premium: bool = False, user_id: int = 0, timeout: int | None = None) -> int:
+    async def _refresh_positions(self):
+        updates = []
+        for tracking, callbacks in (
+            (self._premium_tracking, self._premium_position_callbacks),
+            (self._regular_tracking, self._regular_position_callbacks),
+        ):
+            for index, callback in enumerate(callbacks):
+                if callback is not None:
+                    updates.append(callback(self._active_count + index + 1))
+
+        if updates:
+            await asyncio.gather(*updates, return_exceptions=True)
+
+    def add_job(
+        self,
+        job,
+        is_premium: bool = False,
+        user_id: int = 0,
+        timeout: int | None = None,
+        on_position=None,
+    ) -> int:
         """
         Tambah job ke antrian.
         Mengembalikan posisi 1-based dalam antrian (1 = giliran berikutnya).
@@ -94,11 +116,18 @@ class QueueManager:
         """
         track = self._premium_tracking if is_premium else self._regular_tracking
         queue = self.premium_queue   if is_premium else self.regular_queue
+        position_callbacks = (
+            self._premium_position_callbacks
+            if is_premium else self._regular_position_callbacks
+        )
 
         async def _tracked():
             # Hapus dari tracking saat worker mulai memproses job ini
             if user_id and user_id in track:
-                track.remove(user_id)
+                index = track.index(user_id)
+                track.pop(index)
+                position_callbacks.pop(index)
+            await self._refresh_positions()
             await job()
 
         job_timeout = timeout if timeout is not None else JOB_TIMEOUT
@@ -113,6 +142,7 @@ class QueueManager:
         # Append tracking hanya setelah enqueue berhasil
         if user_id:
             track.append(user_id)
+            position_callbacks.append(on_position)
         # Worker aktif sudah memegang giliran di depan job baru, tetapi
         # user_id job aktif sudah dikeluarkan dari tracking list. Sertakan
         # active_count agar posisi yang tampil tidak menipu (ke-1 padahal

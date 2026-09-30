@@ -395,26 +395,32 @@ def setup(app):
                 if work_dir:
                     cleanup_download(work_dir)
 
-        pos = queue_manager.add_job(social_job, is_prem, uid)
+        async def update_social_queue_position(position: int):
+            quota = QuotaService.get_quota(uid)
+            quota_display = "∞ Unlimited" if quota.get("unlimited") else str(quota["total"])
+            if position > 1:
+                await edit(
+                    f"📋 <b>Masuk antrian!</b>\n"
+                    f"Posisi kamu: <b>ke-{position}</b>\n"
+                    f"📦 Sisa quota: <b>{quota_display}</b>"
+                )
+            else:
+                await edit(
+                    f"📋 <b>Masuk antrian!</b>\n"
+                    f"Posisi kamu: <b>ke-1</b> (giliran berikutnya)\n"
+                    f"📦 Sisa quota: <b>{quota_display}</b>"
+                )
+
+        pos = queue_manager.add_job(
+            social_job, is_prem, uid,
+            on_position=update_social_queue_position,
+        )
         if pos == 0:
             QuotaService.add_quota(uid, 1)
             await edit("❌ Server sedang sibuk, coba lagi nanti.")
             return
 
-        quota = QuotaService.get_quota(uid)
-        quota_display = "∞ Unlimited" if quota.get("unlimited") else str(quota["total"])
-        if pos > 1:
-            await edit(
-                f"📋 <b>Masuk antrian!</b>\n"
-                f"Posisi kamu: <b>ke-{pos}</b>\n"
-                f"📦 Sisa quota: <b>{quota_display}</b>"
-            )
-        else:
-            await edit(
-                f"📋 <b>Masuk antrian!</b>\n"
-                f"Posisi kamu: <b>ke-1</b> (giliran berikutnya)\n"
-                f"📦 Sisa quota: <b>{quota_display}</b>"
-            )
+        await update_social_queue_position(pos)
 
     # ── /get — fungsi tunggal untuk single & bulk ─────────────────────────
     async def get_cmd(update, context):
@@ -744,8 +750,29 @@ def setup(app):
                         if uc is not None:
                             await session_manager.close(uid)
 
+                async def update_single_queue_position(position: int):
+                    if position > 1:
+                        await _edit_s(
+                            f"📋 <b>Masuk antrian!</b>\n"
+                            f"Posisi kamu: <b>ke-{position}</b>\n"
+                            f"⏳ Menunggu download sebelumnya selesai...\n\n"
+                            f"📦 Sisa quota: <b>{quota_disp}</b>",
+                            html=True,
+                        )
+                    else:
+                        await _edit_s(
+                            f"📋 <b>Masuk antrian!</b>\n"
+                            f"Posisi kamu: <b>ke-1</b> (giliran berikutnya)\n"
+                            f"📦 Sisa quota: <b>{quota_disp}</b>",
+                            html=True,
+                        )
+
                 pos = queue_manager.add_job(
-                    single_job, is_prem, uid, timeout=single_job_timeout
+                    single_job,
+                    is_prem,
+                    uid,
+                    timeout=single_job_timeout,
+                    on_position=update_single_queue_position,
                 )
                 if pos == 0:
                     # Race condition: antrian penuh setelah can_add lolos
@@ -753,21 +780,7 @@ def setup(app):
                     await _edit_s("❌ Server sedang sibuk, coba lagi nanti.")
                     return
 
-                if pos > 1:
-                    await _edit_s(
-                        f"📋 <b>Masuk antrian!</b>\n"
-                        f"Posisi kamu: <b>ke-{pos}</b>\n"
-                        f"⏳ Menunggu download sebelumnya selesai...\n\n"
-                        f"📦 Sisa quota: <b>{quota_disp}</b>",
-                        html=True,
-                    )
-                else:
-                    await _edit_s(
-                        f"📋 <b>Masuk antrian!</b>\n"
-                        f"Posisi kamu: <b>ke-1</b> (giliran berikutnya)\n"
-                        f"📦 Sisa quota: <b>{quota_disp}</b>",
-                        html=True,
-                    )
+                await update_single_queue_position(pos)
                 return
 
 
@@ -1141,7 +1154,20 @@ def setup(app):
                     if uc is not None:
                         await session_manager.close(uid)
 
-            pos = queue_manager.add_job(bulk_job, is_prem, uid)
+            async def update_bulk_queue_position(position: int):
+                if position <= 1:
+                    return
+                await _edit_b(
+                    f"📋 <b>Masuk antrian!</b>\n"
+                    f"Posisi kamu: <b>ke-{position}</b> dalam antrian\n"
+                    f"⏳ {count} pesan akan diunduh setelah giliran tiba.\n\n"
+                    f"📦 Sisa quota: <b>{quota_disp}</b>"
+                )
+
+            pos = queue_manager.add_job(
+                bulk_job, is_prem, uid,
+                on_position=update_bulk_queue_position,
+            )
             if pos == 0:
                 QuotaService.add_quota(uid, count)
                 try:
@@ -1154,19 +1180,7 @@ def setup(app):
                 return
 
             if pos > 1:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id, message_id=pmsg_id,
-                        text=(
-                            f"📋 <b>Masuk antrian!</b>\n"
-                            f"Posisi kamu: <b>ke-{pos}</b> dalam antrian\n"
-                            f"⏳ {count} pesan akan diunduh setelah giliran tiba.\n\n"
-                            f"📦 Sisa quota: <b>{quota_disp}</b>"
-                        ),
-                        parse_mode=ParseMode.HTML,
-                    )
-                except TgBadRequest:
-                    pass
+                await update_bulk_queue_position(pos)
             else:
                 try:
                     await bot.edit_message_text(
@@ -1395,13 +1409,27 @@ def setup(app):
                 QuotaService.add_quota(uid, n)
                 await _edit_r(f"❌ Terjadi kesalahan tak terduga: {e}")
 
-        pos_r = queue_manager.add_job(retry_job, is_prem, uid)
+        async def update_retry_queue_position(position: int):
+            if position <= 1:
+                return
+            await _edit_r(
+                f"📋 <b>Retry masuk antrian!</b>\n"
+                f"Posisi kamu: <b>ke-{position}</b>\n"
+                f"⏳ {n} pesan akan diproses setelah giliran tiba."
+            )
+
+        pos_r = queue_manager.add_job(
+            retry_job, is_prem, uid,
+            on_position=update_retry_queue_position,
+        )
         if pos_r == 0:
             QuotaService.add_quota(uid, n)
             await context.bot.send_message(
                 chat_id, "❌ Server sedang sibuk, coba lagi nanti."
             )
             return
+        if pos_r > 1:
+            await update_retry_queue_position(pos_r)
 
     app.add_handler(CommandHandler("canceldownload", cancel_download))
     app.add_handler(CommandHandler("get",            get_cmd))
