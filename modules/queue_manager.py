@@ -41,7 +41,13 @@ class QueueManager:
                         job = self.regular_queue.get_nowait()
                         premium_counter = 0
                     except asyncio.QueueEmpty:
-                        pass
+                        # Jangan biarkan job premium tertahan selamanya setelah
+                        # batas prioritas tercapai jika tidak ada job reguler.
+                        if premium_counter >= PREMIUM_PRIORITY:
+                            try:
+                                job = self.premium_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
 
                 # Kalau keduanya kosong, tunggu sebentar lalu coba lagi
                 # (jangan block di satu queue saja supaya dua queue tetap dicek)
