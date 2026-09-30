@@ -47,6 +47,71 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
         self.assertEqual(result, (True, None, False))
         self.assertEqual(fetch_count, 0)
 
+    def test_public_single_inspection_error_uses_bounded_transfer_fallback(self):
+        async def scenario():
+            with (
+                patch.object(
+                    safe_forward,
+                    "_resolve_source",
+                    new=AsyncMock(return_value=(12345, None)),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_get_message",
+                    new=AsyncMock(side_effect=RuntimeError("protected media metadata")),
+                ),
+            ):
+                return await safe_forward.inspect_message_media_size(
+                    object(), "@channel", 14274, single_only=True
+                )
+
+        result = asyncio.run(scenario())
+        self.assertEqual(result, (True, None, False))
+
+    def test_preflight_error_does_not_fallback_for_albums_or_private_links(self):
+        async def inspect(chat, single_only):
+            with (
+                patch.object(
+                    safe_forward,
+                    "_resolve_source",
+                    new=AsyncMock(return_value=(12345, None)),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_get_message",
+                    new=AsyncMock(side_effect=RuntimeError("metadata unavailable")),
+                ),
+            ):
+                return await safe_forward.inspect_message_media_size(
+                    object(), chat, 14274, single_only=single_only
+                )
+
+        for chat, single_only in (("@channel", False), (-10012345, True)):
+            with self.subTest(chat=chat, single_only=single_only):
+                with self.assertRaisesRegex(RuntimeError, "metadata unavailable"):
+                    asyncio.run(inspect(chat, single_only))
+
+    def test_public_single_preflight_timeout_is_not_queued_as_unknown_size(self):
+        async def scenario():
+            with (
+                patch.object(
+                    safe_forward,
+                    "_resolve_source",
+                    new=AsyncMock(return_value=(12345, None)),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_get_message",
+                    new=AsyncMock(side_effect=asyncio.TimeoutError),
+                ),
+            ):
+                return await safe_forward.inspect_message_media_size(
+                    object(), "@channel", 14274, single_only=True
+                )
+
+        with self.assertRaises(asyncio.TimeoutError):
+            asyncio.run(scenario())
+
     def test_unknown_size_transfer_aborts_when_reported_size_exceeds_limit(self):
         original_poll_interval = safe_forward._TRANSFER_POLL_INTERVAL
 

@@ -799,7 +799,31 @@ async def inspect_message_media_size(
     if source_error:
         raise RuntimeError(source_error)
 
-    message = await _get_message(client, source_chat, msg_id)
+    try:
+        message = await _get_message(client, source_chat, msg_id)
+    except asyncio.TimeoutError:
+        raise
+    except (MessageIdInvalid, MsgIdInvalid):
+        raise
+    except _PEER_ERRORS:
+        raise
+    except Exception as exc:
+        # A public ?single request can still be retried by the transfer worker.
+        # Treat its size as unknown so the worker skips Bot API copy and enforces
+        # the account limit from download progress and the completed file size.
+        # Never apply this fallback to albums, whose other items are unverified.
+        if single_only and isinstance(chat, str) and chat.startswith("@"):
+            logger.warning(
+                "Pre-flight message fetch failed for public single %s/%s; "
+                "retrying with the bounded download path: %s",
+                chat,
+                msg_id,
+                exc,
+                exc_info=True,
+            )
+            return True, None, False
+        raise
+
     if not message or message.empty:
         raise RuntimeError(f"Pesan `{msg_id}` kosong atau sudah dihapus.")
 
