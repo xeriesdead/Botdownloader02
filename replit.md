@@ -25,7 +25,7 @@ A Python Telegram bot with file forwarding, premium subscriptions, user quota ma
 | Variable | Default | Description |
 |---|---|---|
 | `REQUIRED_CHANNEL` | — | Username/ID of channel users must join |
-| `MAX_FILE_SIZE_MB` | 1024 | File size limit for regular users (MB) |
+| `MAX_FILE_SIZE_MB` | 500 | File size limit for regular users (MB) |
 | `MAX_FILE_SIZE_MB_PREMIUM` | 2048 | File size limit for premium users (MB) |
 | `QUOTA_WARN_THRESHOLD` | 2 | Remaining quota that triggers a warning |
 | `YOUTUBE_COOKIES` | — | Netscape-format cookies for yt-dlp |
