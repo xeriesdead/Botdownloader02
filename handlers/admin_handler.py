@@ -26,7 +26,12 @@ from config import ADMIN_IDS
 from database.db import db
 from modules.premium_system import set_premium, remove_premium, premium_info
 from modules.quota_service import QuotaService
-from modules.activity_log import get_user_activity, get_recent_activity, get_top_downloaders
+from modules.activity_log import (
+    count_recent_activity,
+    get_user_activity,
+    get_recent_activity,
+    get_top_downloaders,
+)
 
 
 def is_admin(uid: int) -> bool:
@@ -509,16 +514,47 @@ def setup(app):
 
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
-    # ── /recentactivity [YYYY-MM-DD] ─────────────────────────────────────
+    # ── /recentactivity [YYYY-MM-DD] [halaman] ────────────────────────────
     @admin_only
     async def recent_activity(update, context):
-        filter_date = context.args[0] if context.args else _today_wib()
-        rows = get_recent_activity(date=filter_date, limit=30)
-        if not rows:
+        page_size = 15
+        today = _today_wib()
+        args = context.args or []
+        filter_date = today
+        page = 1
+
+        if len(args) == 1 and args[0].isdigit():
+            page = int(args[0])
+        elif args:
+            filter_date = args[0]
+            if len(args) > 1:
+                try:
+                    page = int(args[1])
+                except ValueError:
+                    return await update.message.reply_text(
+                        "Format: <code>/recentactivity [YYYY-MM-DD] [halaman]</code>",
+                        parse_mode=ParseMode.HTML,
+                    )
+            if len(args) > 2:
+                return await update.message.reply_text(
+                    "Format: <code>/recentactivity [YYYY-MM-DD] [halaman]</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+
+        total = count_recent_activity(date=filter_date)
+        if not total:
             return await update.message.reply_text(
                 f"📭 Tidak ada aktivitas pada <b>{filter_date}</b> (WIB).",
                 parse_mode=ParseMode.HTML,
             )
+
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = max(1, min(page, total_pages))
+        rows = get_recent_activity(
+            date=filter_date,
+            limit=page_size,
+            offset=(page - 1) * page_size,
+        )
 
         _EVENT_ICON = {
             "download":        "📥",
@@ -528,13 +564,26 @@ def setup(app):
             "premium_expired": "⌛",
             "premium_removed": "🗑",
         }
-        lines = [f"📋 <b>Aktivitas Terbaru</b> — <i>{filter_date} WIB</i>\n{'─' * 30}"]
+        lines = [
+            f"📋 <b>Aktivitas Terbaru</b> — <i>{filter_date} WIB</i> "
+            f"[{page}/{total_pages}]\n{'─' * 30}"
+        ]
         for r in rows:
             icon   = _EVENT_ICON.get(r["event_type"], "•")
             waktu  = _wib(r["created_at"])
             uname  = f"@{r['username']}" if r.get("username") else str(r["user_id"])
             detail = f" <code>{r['detail']}</code>" if r["detail"] else ""
             lines.append(f"{icon} <b>{waktu}</b> {uname} — {r['event_type']}{detail}")
+
+        def page_command(target_page: int) -> str:
+            if filter_date == today:
+                return f"/recentactivity {target_page}"
+            return f"/recentactivity {filter_date} {target_page}"
+
+        if page > 1:
+            lines.append(f"\n<i>Halaman sebelumnya: {page_command(page - 1)}</i>")
+        if page < total_pages:
+            lines.append(f"\n<i>Halaman berikutnya: {page_command(page + 1)}</i>")
 
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 

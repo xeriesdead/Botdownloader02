@@ -34,22 +34,35 @@ def get_user_activity(user_id: int, date: str = None, limit: int = 20):
     )
 
 
-def get_recent_activity(date: str = None, limit: int = 30):
+def get_recent_activity(date: str = None, limit: int = 30, offset: int = 0):
     """Ambil aktivitas terbaru dari semua user. date format: 'YYYY-MM-DD' (WIB)."""
     if date:
         return db.fetchall(
             "SELECT a.user_id, u.username, a.event_type, a.detail, a.created_at "
             "FROM activity_log a LEFT JOIN users u ON a.user_id = u.user_id "
             "WHERE date((a.created_at::timestamptz) AT TIME ZONE 'Asia/Jakarta') = ? "
-            "ORDER BY a.created_at DESC LIMIT ?",
-            (date, limit),
+            "ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?",
+            (date, limit, offset),
         )
     return db.fetchall(
         "SELECT a.user_id, u.username, a.event_type, a.detail, a.created_at "
         "FROM activity_log a LEFT JOIN users u ON a.user_id = u.user_id "
-        "ORDER BY a.created_at DESC LIMIT ?",
-        (limit,),
+        "ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?",
+        (limit, offset),
     )
+
+
+def count_recent_activity(date: str = None):
+    """Hitung aktivitas semua user, opsional dibatasi ke satu tanggal WIB."""
+    if date:
+        row = db.fetchone(
+            "SELECT COUNT(*) AS total FROM activity_log "
+            "WHERE date((created_at::timestamptz) AT TIME ZONE 'Asia/Jakarta') = ?",
+            (date,),
+        )
+    else:
+        row = db.fetchone("SELECT COUNT(*) AS total FROM activity_log")
+    return row["total"] if row else 0
 
 
 def get_top_downloaders(date: str = None, limit: int = 10):
