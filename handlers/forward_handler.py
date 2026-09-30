@@ -450,10 +450,9 @@ def setup(app):
                 return await update.message.reply_text(
                     _LINK_INVALID_TEXT, parse_mode=ParseMode.HTML
                 )
-            # Telegram dapat menambahkan ?single saat link menunjuk salah satu
-            # item album. Untuk /get, media_group_id tetap menjadi sumber kebenaran
-            # agar seluruh album dikirim, bukan hanya item yang ditautkan.
-            single_only = False
+            # Link dengan ?single meminta item yang ditautkan saja, meski item itu
+            # merupakan bagian dari album.
+            single_only = is_single_message_link(args[0])
 
             if _requires_user_login(chat) and not _check_logged_in(uid):
                 return await update.message.reply_text(
@@ -492,7 +491,9 @@ def setup(app):
 
             try:
                 has_media, file_size, is_album = await _hard_timeout(
-                    inspect_message_media_size(uc_check, chat, msg_id),
+                    inspect_message_media_size(
+                        uc_check, chat, msg_id, single_only=single_only
+                    ),
                     timeout=_PREFLIGHT_SIZE_TIMEOUT,
                     operation=f"inspect message size {chat}/{msg_id}",
                 )
@@ -516,11 +517,9 @@ def setup(app):
                 f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
                 if is_prem else f"{MAX_FILE_SIZE_MB} MB (Free)"
             )
-            if has_media and file_size is None:
+            if has_media and file_size is None and is_album:
                 size_check_message = (
                     "⚠️ Ukuran media album belum tersedia dari Telegram.\n"
-                    if is_album else
-                    "⚠️ Ukuran media belum tersedia dari Telegram.\n"
                 )
                 return await update.message.reply_text(
                     size_check_message +
@@ -643,7 +642,9 @@ def setup(app):
 
                         try:
                             public_copy_failed = False
-                            if is_public_chat(chat):
+                            if is_public_chat(chat) and not (
+                                has_media and file_size is None
+                            ):
                                 copied = await copy_public_message(
                                     bot, chat_id, chat, msg_id, on_progress=_progress
                                 )
@@ -697,7 +698,10 @@ def setup(app):
                                         uc, bot, chat_id, chat, msg_id,
                                         on_progress=_progress,
                                         is_premium=is_prem,
-                                        skip_public_copy=public_copy_failed,
+                                        skip_public_copy=(
+                                            public_copy_failed
+                                            or (has_media and file_size is None)
+                                        ),
                                         single_only=single_only,
                                     ),
                                     timeout=single_job_timeout,

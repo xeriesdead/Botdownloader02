@@ -40,6 +40,10 @@ from logger import logger
 MAX_RETRIES = 2
 FLOOD_LIMIT = 60
 
+
+class MediaTooLargeError(RuntimeError):
+    """Media melebihi batas aplikasi saat ukurannya baru diketahui dari transfer."""
+
 # Batas upload ulang via Bot API (file di atas ini tidak bisa di-re-upload oleh bot)
 _BOT_API_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
 # Album besar diproses satu per satu agar file sementara tidak menumpuk
@@ -351,6 +355,7 @@ async def _run_transfer_with_watchdog(
     timeout: int,
     operation: str,
     progress=None,
+    max_bytes: int | None = None,
 ):
     """
     Jalankan transfer Pyrogram dengan timeout total dan timeout saat byte tidak
@@ -366,10 +371,18 @@ async def _run_transfer_with_watchdog(
     last_total = None
     progress_task = None
     first_progress_logged = False
+    size_limit_error = None
 
     async def _progress(current: int, total: int):
         nonlocal last_progress_at, last_position, last_total
-        nonlocal progress_task, first_progress_logged
+        nonlocal progress_task, first_progress_logged, size_limit_error
+        if max_bytes is not None and (
+            current > max_bytes or (total > 0 and total > max_bytes)
+        ):
+            size_limit_error = (
+                f"File melebihi batas maksimal {_fmt_size(max_bytes)}."
+            )
+            return
         if current != last_position:
             last_position = current
             last_progress_at = time.monotonic()
@@ -396,6 +409,8 @@ async def _run_transfer_with_watchdog(
     try:
         while not task.done():
             await asyncio.sleep(_TRANSFER_POLL_INTERVAL)
+            if size_limit_error:
+                raise MediaTooLargeError(size_limit_error)
             now = time.monotonic()
             if now - last_progress_at >= _DOWNLOAD_STALL_TIMEOUT:
                 logger.warning(
@@ -414,6 +429,8 @@ async def _run_transfer_with_watchdog(
                 task.cancel()
                 task.add_done_callback(_consume_cancelled_task)
                 raise asyncio.TimeoutError(f"{operation} timeout")
+        if size_limit_error:
+            raise MediaTooLargeError(size_limit_error)
         result = task.result()
         logger.info(
             "[transfer] task completed operation=%s position=%s total=%s result=%s",
@@ -453,6 +470,7 @@ async def _download_media(
     timeout: int,
     operation: str,
     progress=None,
+    max_bytes: int | None = None,
 ):
     """Download media via Pyrogram dengan watchdog transfer yang nyata."""
     downloaded = await _run_transfer_with_watchdog(
@@ -464,6 +482,7 @@ async def _download_media(
         timeout=timeout,
         operation=operation,
         progress=progress,
+        max_bytes=max_bytes,
     )
     if not downloaded:
         return downloaded
@@ -767,7 +786,7 @@ async def _get_message(client, chat, msg_id: int):
 
 
 async def inspect_message_media_size(
-    client, chat, msg_id: int,
+    client, chat, msg_id: int, single_only: bool = False,
 ) -> tuple[bool, int | None, bool]:
     """
     Baca metadata pesan tanpa mengunduh media.
@@ -784,7 +803,7 @@ async def inspect_message_media_size(
     if not message or message.empty:
         raise RuntimeError(f"Pesan `{msg_id}` kosong atau sudah dihapus.")
 
-    is_album = bool(getattr(message, "media_group_id", None))
+    is_album = bool(getattr(message, "media_group_id", None)) and not single_only
     messages = [message]
     if is_album:
         messages = await _fetch_album_messages(client, source_chat, msg_id)
@@ -797,7 +816,7 @@ async def inspect_message_media_size(
     ]
     sizes = [
         size for size in (_get_file_size(item) for item in media_messages)
-        if size is not None
+        if size is not None and size > 0
     ]
     return bool(media_messages), max(sizes, default=None), is_album
 def _get_file_size(msg) -> int | None:
@@ -1570,7 +1589,8 @@ async def _pyrogram_copy_with_notice(client, bot, msg, user_chat_id: int, file_s
 
 
 async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
-                                            file_size: int, on_progress=None):
+                                            file_size: int, on_progress=None,
+                                            max_file_size: int | None = None):
     """
     Untuk file besar (>50 MB) dari channel restricted:
     Download file via Pyrogram lalu upload ulang langsung ke chat bot user via MTProto.
@@ -1581,8 +1601,9 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
     show_progress = on_progress and file_size >= _PROGRESS_MIN_BYTES
     dl_cb = _make_pyrogram_progress(on_progress, "Mengunduh", file_size) if show_progress else None
     work_dir = _new_download_dir(user_chat_id)
-    transfer_timeout = _media_transfer_timeout(file_size, _DOWNLOAD_TIMEOUT)
-    upload_timeout = _media_transfer_timeout(file_size, _UPLOAD_TIMEOUT)
+    transfer_size = max_file_size if max_file_size is not None else file_size
+    transfer_timeout = _media_transfer_timeout(transfer_size, _DOWNLOAD_TIMEOUT)
+    upload_timeout = _media_transfer_timeout(transfer_size, _UPLOAD_TIMEOUT)
     path = None
     thumbnail_path = None
 
@@ -1595,12 +1616,23 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                 timeout=transfer_timeout,
                 operation=f"download message {getattr(msg, 'id', '?')}",
                 progress=dl_cb,
+                max_bytes=max_file_size,
             )
         except asyncio.TimeoutError:
             raise RuntimeError("Download timeout — file terlalu lama diunduh, coba lagi.")
 
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
+
+        if max_file_size is not None:
+            actual_size = os.path.getsize(path)
+            if actual_size > max_file_size:
+                raise MediaTooLargeError(
+                    f"File terlalu besar ({_fmt_size(actual_size)}). "
+                    f"Batas maksimal: {_fmt_size(max_file_size)}."
+                )
+            file_size = actual_size
+            show_progress = on_progress and file_size >= _PROGRESS_MIN_BYTES
 
         await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
         # Kirim ke chat bot (bukan Saved Messages).
@@ -2640,6 +2672,24 @@ class SafeForward:
         # ââ Langkah 4: Kirim ke user (dengan retry) ââââââââââââââââââââââ
         for attempt in range(MAX_RETRIES + 1):
             try:
+                file_media_attrs = (
+                    "document", "video", "audio", "voice",
+                    "video_note", "sticker", "animation", "photo",
+                )
+                if msg.media and not file_size and any(
+                    getattr(msg, attr, None) for attr in file_media_attrs
+                ):
+                    await _download_and_upload_via_pyrogram(
+                        client,
+                        bot,
+                        msg,
+                        user_chat_id,
+                        0,
+                        on_progress=on_progress,
+                        max_file_size=size_limit,
+                    )
+                    return True, None
+
                 if msg.media:
                     if is_restricted:
                         # Channel noforwards: download tetap dilakukan lewat Pyrogram,
@@ -2692,6 +2742,9 @@ class SafeForward:
                     else:
                         return False, f"Pesan `{msg_id}` tidak memiliki konten yang bisa dikirim."
                 return True, None
+
+            except MediaTooLargeError as e:
+                return False, str(e)
 
             except FloodWait as e:
                 wait = min(e.value, FLOOD_LIMIT)
