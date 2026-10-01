@@ -737,7 +737,10 @@ async def _get_message_via_raw_api(client, chat, msg_id: int):
     return parsed
 
 
-async def _get_message(client, chat, msg_id: int):
+_RAW_MESSAGE_FETCH_TIMEOUT = 30
+
+
+async def _get_message(client, chat, msg_id: int, on_progress=None):
     """Ambil pesan dengan wrapper Pyrogram lalu fallback ke raw API."""
     try:
         message = await _hard_timeout(
@@ -745,7 +748,7 @@ async def _get_message(client, chat, msg_id: int):
             timeout=_MSG_FETCH_TIMEOUT,
             operation=f"get_messages({chat}, {msg_id})",
         )
-        if message is not None:
+        if message is not None and not getattr(message, "empty", False):
             return message
         logger.warning(
             "Wrapper get message mengembalikan pesan kosong untuk %s/%s, "
@@ -765,8 +768,23 @@ async def _get_message(client, chat, msg_id: int):
             chat, msg_id, wrapper_error,
         )
 
+    await _notify_progress(
+        on_progress,
+        "📥 <b>Pesan belum terbaca lewat jalur awal; mencoba jalur alternatif...</b>",
+    )
+
     try:
-        return await _get_message_via_raw_api(client, chat, msg_id)
+        message = await _hard_timeout(
+            _get_message_via_raw_api(client, chat, msg_id),
+            timeout=_RAW_MESSAGE_FETCH_TIMEOUT,
+            operation=f"raw get_message({chat}, {msg_id})",
+        )
+        if message is None or getattr(message, "empty", False):
+            logger.warning(
+                "Raw get message juga mengembalikan pesan kosong untuk %s/%s",
+                chat, msg_id,
+            )
+        return message
     except asyncio.TimeoutError:
         raise
     except (MessageIdInvalid, MsgIdInvalid):
@@ -2709,7 +2727,9 @@ class SafeForward:
         # ââ Langkah 2: Ambil pesan âââââââââââââââââââââââââââââââââââââââ
         await _notify_progress(on_progress, "📥 <b>Mengambil pesan dari channel...</b>")
         try:
-            msg = await _get_message(client, source_chat, msg_id)
+            msg = await _get_message(
+                client, source_chat, msg_id, on_progress=on_progress
+            )
         except asyncio.TimeoutError:
             logger.warning(f"Timeout get_messages({source_chat}, {msg_id})")
             return False, (
@@ -2728,7 +2748,10 @@ class SafeForward:
             return False, f"Gagal mengambil pesan: {e}"
 
         if not msg or msg.empty:
-            return False, f"Pesan `{msg_id}` kosong atau sudah dihapus."
+            return False, (
+                f"Pesan `{msg_id}` tidak tersedia untuk sesi Telegram ini. "
+                "Pastikan akun bisa mengakses channel dan pesannya belum dihapus."
+            )
 
         # ââ Auto-deteksi album ââââââââââââââââââââââââââââââââââââââââââââ
         if msg.media_group_id and not single_only:

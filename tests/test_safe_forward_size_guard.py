@@ -23,6 +23,75 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
         )
         self.assertFalse(is_single_message_link(link))
 
+    def test_empty_wrapper_message_uses_raw_api_fallback(self):
+        wrapper_message = SimpleNamespace(empty=True)
+        raw_message = SimpleNamespace(empty=False, media=object())
+        client = SimpleNamespace(
+            get_messages=AsyncMock(return_value=wrapper_message)
+        )
+        progress = AsyncMock()
+
+        async def scenario():
+            with patch.object(
+                safe_forward,
+                "_get_message_via_raw_api",
+                new=AsyncMock(return_value=raw_message),
+            ) as raw_fetch:
+                message = await safe_forward._get_message(
+                    client, 12345, 15635, on_progress=progress
+                )
+                return message, raw_fetch.await_count
+
+        message, raw_count = asyncio.run(scenario())
+        self.assertIs(message, raw_message)
+        self.assertEqual(raw_count, 1)
+        progress.assert_awaited_once()
+        self.assertIn("jalur alternatif", progress.await_args.args[0])
+
+    def test_wrapper_timeout_uses_raw_api_fallback(self):
+        raw_message = SimpleNamespace(empty=False, media=object())
+        client = SimpleNamespace(
+            get_messages=AsyncMock(side_effect=asyncio.TimeoutError)
+        )
+
+        async def scenario():
+            with patch.object(
+                safe_forward,
+                "_get_message_via_raw_api",
+                new=AsyncMock(return_value=raw_message),
+            ) as raw_fetch:
+                message = await safe_forward._get_message(client, 12345, 15635)
+                return message, raw_fetch.await_count
+
+        message, raw_count = asyncio.run(scenario())
+        self.assertIs(message, raw_message)
+        self.assertEqual(raw_count, 1)
+
+    def test_raw_message_fallback_has_a_total_timeout(self):
+        original_timeout = safe_forward._RAW_MESSAGE_FETCH_TIMEOUT
+        client = SimpleNamespace(
+            get_messages=AsyncMock(return_value=SimpleNamespace(empty=True))
+        )
+
+        async def scenario():
+            safe_forward._RAW_MESSAGE_FETCH_TIMEOUT = 0.005
+
+            async def stalled_raw_fetch(*_args):
+                await asyncio.Event().wait()
+
+            try:
+                with patch.object(
+                    safe_forward,
+                    "_get_message_via_raw_api",
+                    new=AsyncMock(side_effect=stalled_raw_fetch),
+                ):
+                    with self.assertRaises(asyncio.TimeoutError):
+                        await safe_forward._get_message(client, 12345, 15635)
+            finally:
+                safe_forward._RAW_MESSAGE_FETCH_TIMEOUT = original_timeout
+
+        asyncio.run(scenario())
+
     def test_single_only_inspection_does_not_expand_album(self):
         message = SimpleNamespace(
             empty=False,
