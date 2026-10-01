@@ -68,6 +68,51 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
         result = asyncio.run(scenario())
         self.assertEqual(result, (True, None, False))
 
+    def test_public_single_source_resolution_error_uses_bounded_transfer_fallback(self):
+        async def inspect(resolve_result=None, resolve_error=None):
+            resolve = AsyncMock(
+                return_value=resolve_result,
+                side_effect=resolve_error,
+            )
+            with (
+                patch.object(safe_forward, "_resolve_source", new=resolve),
+                patch.object(
+                    safe_forward,
+                    "_get_message",
+                    new=AsyncMock(side_effect=RuntimeError("must not fetch")),
+                ) as fetch_message,
+            ):
+                result = await safe_forward.inspect_message_media_size(
+                    object(), "@publicgroup", 14274, single_only=True
+                )
+                return result, fetch_message.await_count
+
+        cases = (
+            {"resolve_error": RuntimeError("temporary resolve failure")},
+            {"resolve_result": (None, "Gagal mengakses channel: temporary RPC failure")},
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                result, fetch_count = asyncio.run(inspect(**case))
+                self.assertEqual(result, (True, None, False))
+                self.assertEqual(fetch_count, 0)
+
+    def test_public_single_source_resolution_timeout_does_not_use_fallback(self):
+        async def scenario():
+            with patch.object(
+                safe_forward,
+                "_resolve_source",
+                new=AsyncMock(
+                    return_value=(None, "Tidak bisa mengakses channel (timeout).")
+                ),
+            ):
+                return await safe_forward.inspect_message_media_size(
+                    object(), "@publicgroup", 14274, single_only=True
+                )
+
+        with self.assertRaises(asyncio.TimeoutError):
+            asyncio.run(scenario())
+
     def test_preflight_error_does_not_fallback_for_albums_or_private_links(self):
         async def inspect(chat, single_only):
             with (

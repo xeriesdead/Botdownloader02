@@ -503,7 +503,14 @@ def setup(app):
                     "Permintaan tidak dimasukkan ke antrian. Coba lagi beberapa saat lagi."
                 )
             except Exception as exc:
-                logger.warning("Pre-flight ukuran gagal %s/%s: %s", chat, msg_id, exc)
+                logger.warning(
+                    "Pre-flight ukuran gagal %s/%s (%s): %s",
+                    chat,
+                    msg_id,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
                 return await update.message.reply_text(
                     "⚠️ Ukuran media belum bisa diperiksa.\n"
                     "Permintaan tidak dimasukkan ke antrian. Coba lagi beberapa saat lagi."

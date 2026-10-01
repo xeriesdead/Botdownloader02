@@ -795,26 +795,27 @@ async def inspect_message_media_size(
     agar file yang melewati batas user ditolak sebelum quota dipotong atau
     masuk antrian. Untuk album, ukuran terbesar dihitung dari seluruh media.
     """
-    source_chat, source_error = await _resolve_source(client, chat)
-    if source_error:
-        raise RuntimeError(source_error)
-
+    public_single = (
+        single_only and isinstance(chat, str) and chat.startswith("@")
+    )
     try:
+        source_chat, source_error = await _resolve_source(client, chat)
+        if source_error:
+            if public_single and "timeout" in source_error.casefold():
+                raise asyncio.TimeoutError(source_error)
+            raise RuntimeError(source_error)
         message = await _get_message(client, source_chat, msg_id)
     except asyncio.TimeoutError:
         raise
-    except (MessageIdInvalid, MsgIdInvalid):
-        raise
-    except _PEER_ERRORS:
-        raise
     except Exception as exc:
-        # A public ?single request can still be retried by the transfer worker.
-        # Treat its size as unknown so the worker skips Bot API copy and enforces
+        # Public ?single requests can be retried by the transfer worker even
+        # when chat resolution or message metadata fails during pre-flight.
+        # Treat the size as unknown so the worker skips Bot API copy and enforces
         # the account limit from download progress and the completed file size.
         # Never apply this fallback to albums, whose other items are unverified.
-        if single_only and isinstance(chat, str) and chat.startswith("@"):
+        if public_single:
             logger.warning(
-                "Pre-flight message fetch failed for public single %s/%s; "
+                "Pre-flight resolve/fetch failed for public single %s/%s; "
                 "retrying with the bounded download path: %s",
                 chat,
                 msg_id,
