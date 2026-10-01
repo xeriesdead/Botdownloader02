@@ -127,9 +127,15 @@ class SessionManager:
                         pass
                 return None
 
-    async def get_for_chat(self, user_id: int, chat) -> Client | None:
-        """Pilih sesi bot untuk publik, atau sesi user untuk chat private."""
+    async def get_for_chat(
+        self, user_id: int, chat, prefer_user: bool = False
+    ) -> Client | None:
+        """Pilih sesi bot untuk publik, kecuali fallback perlu sesi user."""
         if isinstance(chat, str) and chat.startswith("@"):
+            if prefer_user:
+                user_client = await self.get(user_id)
+                if user_client is not None:
+                    return user_client
             return await self.get_public()
         return await self.get(user_id)
 

@@ -681,7 +681,15 @@ def setup(app):
                             session_lookup = (
                                 session_manager.get(uid)
                                 if public_copy_failed
-                                else session_manager.get_for_chat(uid, chat)
+                                else session_manager.get_for_chat(
+                                    uid,
+                                    chat,
+                                    prefer_user=(
+                                        is_public_chat(chat)
+                                        and has_media
+                                        and file_size is None
+                                    ),
+                                )
                             )
                             uc = await _hard_timeout(
                                 session_lookup,
