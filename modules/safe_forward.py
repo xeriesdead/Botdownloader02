@@ -795,28 +795,24 @@ async def inspect_message_media_size(
     agar file yang melewati batas user ditolak sebelum quota dipotong atau
     masuk antrian. Untuk album, ukuran terbesar dihitung dari seluruh media.
     """
-    public_single = (
-        single_only and isinstance(chat, str) and chat.startswith("@")
-    )
+    public_chat = isinstance(chat, str) and chat.startswith("@")
     try:
         source_chat, source_error = await _resolve_source(client, chat)
         if source_error:
-            if public_single and "timeout" in source_error.casefold():
+            if public_chat and "timeout" in source_error.casefold():
                 raise asyncio.TimeoutError(source_error)
             raise RuntimeError(source_error)
         message = await _get_message(client, source_chat, msg_id)
     except asyncio.TimeoutError:
         raise
     except Exception as exc:
-        # Public ?single requests can be retried by the transfer worker even
-        # when chat resolution or message metadata fails during pre-flight.
-        # Treat the size as unknown so the worker skips Bot API copy and enforces
-        # the account limit from download progress and the completed file size.
-        # Never apply this fallback to albums, whose other items are unverified.
-        if public_single:
+        # Public messages can be retried by the transfer worker even when
+        # pre-flight resolution or message lookup fails. The worker rechecks
+        # albums and rejects them if any item's size is unknown.
+        if public_chat:
             logger.warning(
-                "Pre-flight resolve/fetch failed for public single %s/%s; "
-                "retrying with the bounded download path: %s",
+                "Pre-flight resolve/fetch failed for public message %s/%s; "
+                "retrying with transfer-time size checks: %s",
                 chat,
                 msg_id,
                 exc,
@@ -826,13 +822,44 @@ async def inspect_message_media_size(
         raise
 
     if not message or message.empty:
+        if public_chat:
+            logger.warning(
+                "Pre-flight returned an empty public message %s/%s; "
+                "retrying in the transfer worker",
+                chat,
+                msg_id,
+            )
+            return True, None, False
         raise RuntimeError(f"Pesan `{msg_id}` kosong atau sudah dihapus.")
 
     is_album = bool(getattr(message, "media_group_id", None)) and not single_only
     messages = [message]
     if is_album:
-        messages = await _fetch_album_messages(client, source_chat, msg_id)
+        try:
+            messages = await _fetch_album_messages(client, source_chat, msg_id)
+        except asyncio.TimeoutError:
+            raise
+        except Exception as exc:
+            if public_chat:
+                logger.warning(
+                    "Pre-flight album fetch failed for public message %s/%s; "
+                    "retrying with worker-side album size checks: %s",
+                    chat,
+                    msg_id,
+                    exc,
+                    exc_info=True,
+                )
+                return True, None, False
+            raise
         if not messages:
+            if public_chat:
+                logger.warning(
+                    "Pre-flight returned no public album items for %s/%s; "
+                    "retrying in the transfer worker",
+                    chat,
+                    msg_id,
+                )
+                return True, None, False
             raise RuntimeError(f"Album pesan `{msg_id}` kosong atau sudah dihapus.")
 
     media_messages = [
@@ -2505,6 +2532,38 @@ class SafeForward:
                         "Album metadata error for %s/%s", source_chat, msg_id
                     )
                     return False, f"Gagal mengambil album: {e}"
+
+                album_media = [
+                    message for message in album_messages
+                    if getattr(message, "media", None)
+                ]
+                album_sizes = [
+                    _get_file_size(message) for message in album_media
+                ]
+                size_limit = (
+                    MAX_FILE_SIZE_BYTES_PREMIUM
+                    if is_premium else MAX_FILE_SIZE_BYTES
+                )
+                size_label = (
+                    f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
+                    if is_premium else f"{MAX_FILE_SIZE_MB} MB"
+                )
+                largest_size = max(
+                    (size for size in album_sizes if size),
+                    default=0,
+                )
+                if largest_size > size_limit:
+                    return False, (
+                        f"Album memiliki media terlalu besar "
+                        f"({_fmt_size(largest_size)}). Batas maksimal: "
+                        f"{size_label}."
+                    )
+                if not album_media or any(not size for size in album_sizes):
+                    return False, (
+                        "Ukuran salah satu media album tidak tersedia. "
+                        "Album dibatalkan agar batas ukuran tetap terjaga."
+                    )
+
                 is_restricted = any(
                     bool(getattr(message, "has_protected_content", False))
                     for message in album_messages

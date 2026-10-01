@@ -11,9 +11,18 @@ os.environ.setdefault("API_HASH", "test")
 os.environ.setdefault("BOT_TOKEN", "test")
 
 from modules import safe_forward
+from modules.link_parser import is_single_message_link, parse_telegram_link
 
 
 class SafeForwardSizeGuardTests(unittest.TestCase):
+    def test_reported_public_group_link_is_not_a_single_query(self):
+        link = "https://t.me/lembukacucukan34/14274/"
+        self.assertEqual(
+            parse_telegram_link(link),
+            ("@lembukacucukan34", 14274),
+        )
+        self.assertFalse(is_single_message_link(link))
+
     def test_single_only_inspection_does_not_expand_album(self):
         message = SimpleNamespace(
             empty=False,
@@ -47,8 +56,8 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
         self.assertEqual(result, (True, None, False))
         self.assertEqual(fetch_count, 0)
 
-    def test_public_single_inspection_error_uses_bounded_transfer_fallback(self):
-        async def scenario():
+    def test_public_inspection_error_uses_bounded_transfer_fallback(self):
+        async def scenario(single_only):
             with (
                 patch.object(
                     safe_forward,
@@ -62,14 +71,36 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
                 ),
             ):
                 return await safe_forward.inspect_message_media_size(
-                    object(), "@channel", 14274, single_only=True
+                    object(), "@channel", 14274, single_only=single_only
                 )
 
-        result = asyncio.run(scenario())
-        self.assertEqual(result, (True, None, False))
+        for single_only in (True, False):
+            with self.subTest(single_only=single_only):
+                result = asyncio.run(scenario(single_only))
+                self.assertEqual(result, (True, None, False))
 
-    def test_public_single_source_resolution_error_uses_bounded_transfer_fallback(self):
-        async def inspect(resolve_result=None, resolve_error=None):
+    def test_empty_public_message_is_retried_by_worker(self):
+        async def scenario():
+            with (
+                patch.object(
+                    safe_forward,
+                    "_resolve_source",
+                    new=AsyncMock(return_value=(12345, None)),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_get_message",
+                    new=AsyncMock(return_value=SimpleNamespace(empty=True)),
+                ),
+            ):
+                return await safe_forward.inspect_message_media_size(
+                    object(), "@publicgroup", 14274, single_only=False
+                )
+
+        self.assertEqual(asyncio.run(scenario()), (True, None, False))
+
+    def test_public_source_resolution_error_uses_bounded_transfer_fallback(self):
+        async def inspect(resolve_result=None, resolve_error=None, single_only=False):
             resolve = AsyncMock(
                 return_value=resolve_result,
                 side_effect=resolve_error,
@@ -83,13 +114,19 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
                 ) as fetch_message,
             ):
                 result = await safe_forward.inspect_message_media_size(
-                    object(), "@publicgroup", 14274, single_only=True
+                    object(), "@publicgroup", 14274, single_only=single_only
                 )
                 return result, fetch_message.await_count
 
         cases = (
-            {"resolve_error": RuntimeError("temporary resolve failure")},
-            {"resolve_result": (None, "Gagal mengakses channel: temporary RPC failure")},
+            {
+                "resolve_error": RuntimeError("temporary resolve failure"),
+                "single_only": False,
+            },
+            {
+                "resolve_result": (None, "Gagal mengakses channel: temporary RPC failure"),
+                "single_only": True,
+            },
         )
         for case in cases:
             with self.subTest(case=case):
@@ -97,7 +134,7 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
                 self.assertEqual(result, (True, None, False))
                 self.assertEqual(fetch_count, 0)
 
-    def test_public_single_source_resolution_timeout_does_not_use_fallback(self):
+    def test_public_source_resolution_timeout_does_not_use_fallback(self):
         async def scenario():
             with patch.object(
                 safe_forward,
@@ -107,14 +144,14 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
                 ),
             ):
                 return await safe_forward.inspect_message_media_size(
-                    object(), "@publicgroup", 14274, single_only=True
+                    object(), "@publicgroup", 14274, single_only=False
                 )
 
         with self.assertRaises(asyncio.TimeoutError):
             asyncio.run(scenario())
 
-    def test_preflight_error_does_not_fallback_for_albums_or_private_links(self):
-        async def inspect(chat, single_only):
+    def test_preflight_error_does_not_fallback_for_private_links(self):
+        async def inspect():
             with (
                 patch.object(
                     safe_forward,
@@ -128,13 +165,105 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
                 ),
             ):
                 return await safe_forward.inspect_message_media_size(
-                    object(), chat, 14274, single_only=single_only
+                    object(), -10012345, 14274, single_only=True
                 )
 
-        for chat, single_only in (("@channel", False), (-10012345, True)):
-            with self.subTest(chat=chat, single_only=single_only):
-                with self.assertRaisesRegex(RuntimeError, "metadata unavailable"):
-                    asyncio.run(inspect(chat, single_only))
+        with self.assertRaisesRegex(RuntimeError, "metadata unavailable"):
+            asyncio.run(inspect())
+
+    def test_public_album_fetch_error_defers_to_worker_side_size_checks(self):
+        message = SimpleNamespace(
+            empty=False,
+            media_group_id="album-1",
+            media=object(),
+            video=SimpleNamespace(file_size=None),
+        )
+
+        async def scenario():
+            with (
+                patch.object(
+                    safe_forward,
+                    "_resolve_source",
+                    new=AsyncMock(return_value=(12345, None)),
+                ),
+                patch.object(
+                    safe_forward, "_get_message", new=AsyncMock(return_value=message)
+                ),
+                patch.object(
+                    safe_forward,
+                    "_fetch_album_messages",
+                    new=AsyncMock(
+                        side_effect=RuntimeError("album metadata unavailable")
+                    ),
+                ),
+            ):
+                return await safe_forward.inspect_message_media_size(
+                    object(), "@publicgroup", 14274, single_only=False
+                )
+
+        self.assertEqual(asyncio.run(scenario()), (True, None, False))
+
+    def test_album_unknown_or_oversized_media_is_rejected_before_copy_or_upload(self):
+        async def run_album(file_size):
+            message = SimpleNamespace(
+                empty=False,
+                media_group_id="album-1",
+                media=object(),
+                video=SimpleNamespace(file_size=file_size),
+                has_protected_content=False,
+            )
+            with (
+                patch.object(
+                    safe_forward,
+                    "_resolve_source",
+                    new=AsyncMock(return_value=(12345, None)),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_fetch_album_messages",
+                    new=AsyncMock(return_value=[message]),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_copy_public_album",
+                    new=AsyncMock(return_value=None),
+                ) as copy_album,
+                patch.object(
+                    safe_forward,
+                    "_send_album_via_bot",
+                    new=AsyncMock(return_value=(True, None)),
+                ) as send_via_bot,
+                patch.object(
+                    safe_forward,
+                    "_send_album_streaming_individually",
+                    new=AsyncMock(return_value=(True, None)),
+                ) as stream_album,
+            ):
+                result = await safe_forward.SafeForward.run_album(
+                    object(), object(), 456, "@publicgroup", 14274
+                )
+                return (
+                    result,
+                    copy_album.await_count,
+                    send_via_bot.await_count,
+                    stream_album.await_count,
+                )
+
+        cases = (
+            (None, "Ukuran salah satu media album tidak tersedia"),
+            (
+                safe_forward.MAX_FILE_SIZE_BYTES + 1,
+                "Album memiliki media terlalu besar",
+            ),
+        )
+        for file_size, expected_reason in cases:
+            with self.subTest(file_size=file_size):
+                (ok, reason), copy_count, bot_count, stream_count = asyncio.run(
+                    run_album(file_size)
+                )
+                self.assertFalse(ok)
+                self.assertIn(expected_reason, reason)
+                self.assertEqual((copy_count, bot_count, stream_count), (0, 0, 0))
 
     def test_public_single_preflight_timeout_is_not_queued_as_unknown_size(self):
         async def scenario():
