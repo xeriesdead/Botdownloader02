@@ -450,8 +450,8 @@ def setup(app):
                 return await update.message.reply_text(
                     _LINK_INVALID_TEXT, parse_mode=ParseMode.HTML
                 )
-            # Link dengan ?single meminta item yang ditautkan saja, meski item itu
-            # merupakan bagian dari album.
+            # ?single menunjuk ke item tertentu dalam album. Tetap deteksi
+            # grupnya agar user bisa memilih album penuh atau item tertaut saja.
             single_only = is_single_message_link(args[0])
 
             if _requires_user_login(chat) and not _check_logged_in(uid):
@@ -524,7 +524,7 @@ def setup(app):
                 f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
                 if is_prem else f"{MAX_FILE_SIZE_MB} MB (Free)"
             )
-            if has_media and file_size is None and is_album:
+            if has_media and file_size is None and is_album and not single_only:
                 size_check_message = (
                     "⚠️ Ukuran media album belum tersedia dari Telegram.\n"
                 )
@@ -534,7 +534,7 @@ def setup(app):
                     "Coba lagi beberapa saat lagi."
                 )
             if file_size and file_size > size_limit:
-                if is_album:
+                if is_album and not single_only:
                     if is_prem:
                         return await update.message.reply_text(
                             "❌ <b>Album memiliki media yang terlalu besar.</b>\n\n"
@@ -813,11 +813,12 @@ def setup(app):
                 _album_choice_waiters[token] = (uid, choice_future)
                 try:
                     choice_message = await update.message.reply_text(
-                        "📚 <b>Album terdeteksi</b>\nPilih format pengiriman:",
+                        "📦 <b>Pilih format pengiriman</b>\n"
+                        "Kirim seluruh album atau hanya media yang ditautkan:",
                         parse_mode=ParseMode.HTML,
                         reply_markup=InlineKeyboardMarkup([[
                             InlineKeyboardButton("📚 Kirim sebagai album", callback_data=f"album_choice:{token}:album"),
-                            InlineKeyboardButton("📄 Kirim satuan", callback_data=f"album_choice:{token}:single"),
+                            InlineKeyboardButton("📄 Hanya media pada tautan", callback_data=f"album_choice:{token}:single"),
                         ]]),
                     )
                 except Exception as exc:

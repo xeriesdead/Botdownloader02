@@ -203,7 +203,7 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
                 return result, fetch_album.await_count
 
         result, fetch_count = asyncio.run(scenario())
-        self.assertEqual(result, (True, None, False))
+        self.assertEqual(result, (True, None, True))
         self.assertEqual(fetch_count, 0)
 
     def test_public_inspection_error_uses_bounded_transfer_fallback(self):
@@ -227,10 +227,10 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
         for single_only in (True, False):
             with self.subTest(single_only=single_only):
                 result = asyncio.run(scenario(single_only))
-                self.assertEqual(result, (True, None, False))
+                self.assertEqual(result, (True, None, single_only))
 
     def test_empty_public_message_is_retried_by_worker(self):
-        async def scenario():
+        async def scenario(single_only):
             with (
                 patch.object(
                     safe_forward,
@@ -244,10 +244,15 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
                 ),
             ):
                 return await safe_forward.inspect_message_media_size(
-                    object(), "@publicgroup", 14274, single_only=False
+                    object(), "@publicgroup", 14274, single_only=single_only
                 )
 
-        self.assertEqual(asyncio.run(scenario()), (True, None, False))
+        for single_only in (True, False):
+            with self.subTest(single_only=single_only):
+                self.assertEqual(
+                    asyncio.run(scenario(single_only)),
+                    (True, None, single_only),
+                )
 
     def test_public_source_resolution_error_uses_bounded_transfer_fallback(self):
         async def inspect(resolve_result=None, resolve_error=None, single_only=False):
@@ -281,7 +286,9 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case):
                 result, fetch_count = asyncio.run(inspect(**case))
-                self.assertEqual(result, (True, None, False))
+                self.assertEqual(
+                    result, (True, None, case["single_only"])
+                )
                 self.assertEqual(fetch_count, 0)
 
     def test_public_source_resolution_timeout_does_not_use_fallback(self):

@@ -907,9 +907,9 @@ async def inspect_message_media_size(
     """
     Baca metadata pesan tanpa mengunduh media.
 
-    Return (has_media, largest_file_size, is_album). Dipakai sebagai pre-flight
-    agar file yang melewati batas user ditolak sebelum quota dipotong atau
-    masuk antrian. Untuk album, ukuran terbesar dihitung dari seluruh media.
+    Return (has_media, largest_file_size, is_album). A single-item link can
+    still point into an album; preserve that grouping signal even when
+    single_only skips expanding album metadata during pre-flight.
     """
     public_chat = isinstance(chat, str) and chat.startswith("@")
     try:
@@ -936,7 +936,7 @@ async def inspect_message_media_size(
                 exc,
                 exc_info=True,
             )
-            return True, None, False
+            return True, None, single_only
         raise
 
     if not message or message.empty:
@@ -947,12 +947,12 @@ async def inspect_message_media_size(
                 chat,
                 msg_id,
             )
-            return True, None, False
+            return True, None, single_only
         raise RuntimeError(f"Pesan `{msg_id}` kosong atau sudah dihapus.")
 
-    is_album = bool(getattr(message, "media_group_id", None)) and not single_only
+    is_album = bool(getattr(message, "media_group_id", None))
     messages = [message]
-    if is_album:
+    if is_album and not single_only:
         try:
             messages = await _fetch_album_messages(client, source_chat, msg_id)
         except asyncio.TimeoutError:
