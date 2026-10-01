@@ -76,7 +76,7 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
         async def scenario():
             safe_forward._RAW_MESSAGE_FETCH_TIMEOUT = 0.005
 
-            async def stalled_raw_fetch(*_args):
+            async def stalled_raw_fetch(*_args, **_kwargs):
                 await asyncio.Event().wait()
 
             try:

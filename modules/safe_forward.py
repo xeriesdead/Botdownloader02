@@ -678,7 +678,7 @@ async def _resolve_source(client, chat) -> tuple[object | None, str | None]:
         return None, f"Gagal mengakses channel: {e}"
 
 
-async def _get_message_via_raw_api(client, chat, msg_id: int):
+async def _get_message_via_raw_api(client, chat, msg_id: int, on_progress=None):
     """
     Ambil satu pesan lewat raw MTProto API.
 
@@ -686,12 +686,26 @@ async def _get_message_via_raw_api(client, chat, msg_id: int):
     berhenti setelah peer berhasil di-resolve. Raw channels.getMessages /
     messages.getMessages menghindari lookup wrapper tersebut.
     """
+    await _notify_progress(
+        on_progress,
+        "📥 <b>Jalur alternatif (1/2): memeriksa akses channel...</b>",
+    )
     peer = await _hard_timeout(
         client.resolve_peer(chat),
-        timeout=_PEER_RESOLVE_TIMEOUT,
+        timeout=_RAW_PEER_RESOLVE_TIMEOUT,
         operation=f"resolve_peer({chat})",
     )
+    logger.info(
+        "[message-fetch] raw peer resolved chat=%s message_id=%s peer_type=%s",
+        chat,
+        msg_id,
+        type(peer).__name__,
+    )
     message_id = raw.types.InputMessageID(id=msg_id)
+    await _notify_progress(
+        on_progress,
+        "📥 <b>Jalur alternatif (2/2): meminta pesan ke Telegram...</b>",
+    )
 
     if isinstance(peer, raw.types.InputPeerChannel):
         # channels.getMessages expects InputChannel, not InputPeerChannel.
@@ -708,7 +722,7 @@ async def _get_message_via_raw_api(client, chat, msg_id: int):
                     id=[message_id],
                 )
             ),
-            timeout=_MSG_FETCH_TIMEOUT,
+            timeout=_RAW_MESSAGE_QUERY_TIMEOUT,
             operation=f"channels.getMessages({chat}, {msg_id})",
         )
     else:
@@ -718,10 +732,17 @@ async def _get_message_via_raw_api(client, chat, msg_id: int):
                     id=[message_id],
                 )
             ),
-            timeout=_MSG_FETCH_TIMEOUT,
+            timeout=_RAW_MESSAGE_QUERY_TIMEOUT,
             operation=f"messages.getMessages({chat}, {msg_id})",
         )
 
+    logger.info(
+        "[message-fetch] raw response received chat=%s message_id=%s "
+        "message_count=%s",
+        chat,
+        msg_id,
+        len(getattr(result, "messages", None) or []),
+    )
     messages = getattr(result, "messages", None) or []
     if not messages:
         return None
@@ -737,11 +758,14 @@ async def _get_message_via_raw_api(client, chat, msg_id: int):
     return parsed
 
 
-_RAW_MESSAGE_FETCH_TIMEOUT = 30
+_RAW_MESSAGE_FETCH_TIMEOUT = 28
+_RAW_PEER_RESOLVE_TIMEOUT = 6
+_RAW_MESSAGE_QUERY_TIMEOUT = 12
 
 
 async def _get_message(client, chat, msg_id: int, on_progress=None):
     """Ambil pesan dengan wrapper Pyrogram lalu fallback ke raw API."""
+    fallback_reason = "pesan kosong"
     try:
         message = await _hard_timeout(
             client.get_messages(chat, msg_id),
@@ -756,6 +780,7 @@ async def _get_message(client, chat, msg_id: int, on_progress=None):
             chat, msg_id,
         )
     except asyncio.TimeoutError:
+        fallback_reason = "pembacaan awal timeout"
         logger.warning(
             "Wrapper get message timeout untuk %s/%s, coba raw API",
             chat, msg_id,
@@ -763,6 +788,7 @@ async def _get_message(client, chat, msg_id: int, on_progress=None):
     except (MessageIdInvalid, MsgIdInvalid):
         raise
     except Exception as wrapper_error:
+        fallback_reason = "pembacaan awal gagal"
         logger.warning(
             "Wrapper get message gagal untuk %s/%s, coba raw API: %s",
             chat, msg_id, wrapper_error,
@@ -770,14 +796,32 @@ async def _get_message(client, chat, msg_id: int, on_progress=None):
 
     await _notify_progress(
         on_progress,
-        "📥 <b>Pesan belum terbaca lewat jalur awal; mencoba jalur alternatif...</b>",
+        "📥 <b>Pesan belum terbaca lewat jalur awal "
+        f"({fallback_reason}); mencoba jalur alternatif...</b>",
+    )
+    raw_started_at = time.monotonic()
+    logger.info(
+        "[message-fetch] raw fallback start chat=%s message_id=%s cause=%s",
+        chat,
+        msg_id,
+        fallback_reason,
     )
 
     try:
         message = await _hard_timeout(
-            _get_message_via_raw_api(client, chat, msg_id),
+            _get_message_via_raw_api(
+                client, chat, msg_id, on_progress=on_progress
+            ),
             timeout=_RAW_MESSAGE_FETCH_TIMEOUT,
             operation=f"raw get_message({chat}, {msg_id})",
+        )
+        logger.info(
+            "[message-fetch] raw fallback finished chat=%s message_id=%s "
+            "elapsed=%.1fs empty=%s",
+            chat,
+            msg_id,
+            time.monotonic() - raw_started_at,
+            message is None or bool(getattr(message, "empty", False)),
         )
         if message is None or getattr(message, "empty", False):
             logger.warning(
@@ -2733,8 +2777,9 @@ class SafeForward:
         except asyncio.TimeoutError:
             logger.warning(f"Timeout get_messages({source_chat}, {msg_id})")
             return False, (
-                "❌ Tidak bisa mengambil pesan (timeout).\n"
-                "Pastikan akun sudah bergabung ke channel tersebut."
+                "⏱️ Telegram tidak merespons saat mengambil pesan; percobaan "
+                "dihentikan agar proses tidak menggantung.\n"
+                "Pastikan akun bisa mengakses channel, lalu coba lagi."
             )
         except (MessageIdInvalid, MsgIdInvalid):
             return False, f"Pesan nomor `{msg_id}` tidak ditemukan."

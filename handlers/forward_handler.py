@@ -600,7 +600,11 @@ def setup(app):
                             timeout=15,
                         )
                     except Exception as exc:
-                        logger.debug("Gagal update status message %s: %s", pmsg_id, exc)
+                        logger.warning(
+                            "Gagal update status /get message %s: %s",
+                            pmsg_id,
+                            exc,
+                        )
 
                 last_progress = [time.monotonic()]
                 single_job_timeout = (
@@ -612,8 +616,8 @@ def setup(app):
                     async def _heartbeat():
                         try:
                             while True:
-                                await asyncio.sleep(20)
-                                if time.monotonic() - last_progress[0] >= 20:
+                                await asyncio.sleep(10)
+                                if time.monotonic() - last_progress[0] >= 10:
                                     await _edit_s(
                                         "⏳ <b>Masih memproses download...</b>\n"
                                         "<i>Koneksi Telegram sedang lambat, bot belum berhenti.</i>",
