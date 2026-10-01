@@ -678,7 +678,9 @@ async def _resolve_source(client, chat) -> tuple[object | None, str | None]:
         return None, f"Gagal mengakses channel: {e}"
 
 
-async def _get_message_via_raw_api(client, chat, msg_id: int, on_progress=None):
+async def _get_message_via_raw_api(
+    client, chat, msg_id: int, on_progress=None, peer_hint=None,
+):
     """
     Ambil satu pesan lewat raw MTProto API.
 
@@ -690,10 +692,27 @@ async def _get_message_via_raw_api(client, chat, msg_id: int, on_progress=None):
         on_progress,
         "📥 <b>Jalur alternatif (1/2): memeriksa akses channel...</b>",
     )
+    # Refresh a public peer before the raw request. resolve_peer() alone may
+    # return a cached access hash; refreshing by username helps when that stale
+    # peer makes Telegram answer MessageEmpty although the account can open it.
+    peer_to_resolve = (
+        peer_hint
+        if isinstance(peer_hint, str) and peer_hint.startswith("@")
+        else chat
+    )
+    if isinstance(peer_to_resolve, str) and peer_to_resolve.startswith("@"):
+        username = peer_to_resolve[1:]
+        await _hard_timeout(
+            client.invoke(
+                raw.functions.contacts.ResolveUsername(username=username)
+            ),
+            timeout=_RAW_PEER_RESOLVE_TIMEOUT,
+            operation=f"contacts.resolveUsername({peer_to_resolve})",
+        )
     peer = await _hard_timeout(
-        client.resolve_peer(chat),
+        client.resolve_peer(peer_to_resolve),
         timeout=_RAW_PEER_RESOLVE_TIMEOUT,
-        operation=f"resolve_peer({chat})",
+        operation=f"resolve_peer({peer_to_resolve})",
     )
     logger.info(
         "[message-fetch] raw peer resolved chat=%s message_id=%s peer_type=%s",
@@ -763,7 +782,9 @@ _RAW_PEER_RESOLVE_TIMEOUT = 6
 _RAW_MESSAGE_QUERY_TIMEOUT = 12
 
 
-async def _get_message(client, chat, msg_id: int, on_progress=None):
+async def _get_message(
+    client, chat, msg_id: int, on_progress=None, peer_hint=None,
+):
     """Ambil pesan dengan wrapper Pyrogram lalu fallback ke raw API."""
     fallback_reason = "pesan kosong"
     try:
@@ -810,7 +831,11 @@ async def _get_message(client, chat, msg_id: int, on_progress=None):
     try:
         message = await _hard_timeout(
             _get_message_via_raw_api(
-                client, chat, msg_id, on_progress=on_progress
+                client,
+                chat,
+                msg_id,
+                on_progress=on_progress,
+                peer_hint=peer_hint,
             ),
             timeout=_RAW_MESSAGE_FETCH_TIMEOUT,
             operation=f"raw get_message({chat}, {msg_id})",
@@ -864,7 +889,9 @@ async def inspect_message_media_size(
             if public_chat and "timeout" in source_error.casefold():
                 raise asyncio.TimeoutError(source_error)
             raise RuntimeError(source_error)
-        message = await _get_message(client, source_chat, msg_id)
+        message = await _get_message(
+            client, source_chat, msg_id, peer_hint=chat
+        )
     except asyncio.TimeoutError:
         raise
     except Exception as exc:
@@ -2772,7 +2799,11 @@ class SafeForward:
         await _notify_progress(on_progress, "📥 <b>Mengambil pesan dari channel...</b>")
         try:
             msg = await _get_message(
-                client, source_chat, msg_id, on_progress=on_progress
+                client,
+                source_chat,
+                msg_id,
+                on_progress=on_progress,
+                peer_hint=chat,
             )
         except asyncio.TimeoutError:
             logger.warning(f"Timeout get_messages({source_chat}, {msg_id})")

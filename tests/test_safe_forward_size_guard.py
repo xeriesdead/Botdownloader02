@@ -48,6 +48,79 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
         progress.assert_awaited_once()
         self.assertIn("jalur alternatif", progress.await_args.args[0])
 
+    def test_public_username_is_preserved_for_raw_peer_resolution(self):
+        wrapper_message = SimpleNamespace(empty=True)
+        raw_message = SimpleNamespace(empty=False, media=object())
+        client = SimpleNamespace(
+            get_messages=AsyncMock(return_value=wrapper_message)
+        )
+
+        async def scenario():
+            with patch.object(
+                safe_forward,
+                "_get_message_via_raw_api",
+                new=AsyncMock(return_value=raw_message),
+            ) as raw_fetch:
+                message = await safe_forward._get_message(
+                    client,
+                    -1004374922177,
+                    15636,
+                    peer_hint="@lembukacukan34",
+                )
+                return message, raw_fetch.await_args
+
+        message, raw_args = asyncio.run(scenario())
+        self.assertIs(message, raw_message)
+        self.assertEqual(raw_args.args[1:3], (-1004374922177, 15636))
+        self.assertEqual(raw_args.kwargs["peer_hint"], "@lembukacukan34")
+
+    def test_raw_api_resolves_public_username_instead_of_numeric_peer(self):
+        peer = safe_forward.raw.types.InputPeerChannel(
+            channel_id=4374922177,
+            access_hash=123,
+        )
+        client = SimpleNamespace(
+            resolve_peer=AsyncMock(return_value=peer),
+            invoke=AsyncMock(
+                return_value=SimpleNamespace(
+                    messages=[object()],
+                    users=[],
+                    chats=[],
+                )
+            ),
+        )
+
+        async def scenario():
+            with patch.object(
+                safe_forward.Message,
+                "_parse",
+                return_value=SimpleNamespace(empty=False),
+            ):
+                return await safe_forward._get_message_via_raw_api(
+                    client,
+                    -1004374922177,
+                    15636,
+                    peer_hint="@lembukacukan34",
+                )
+
+        message = asyncio.run(scenario())
+        self.assertFalse(message.empty)
+        client.resolve_peer.assert_awaited_once_with("@lembukacukan34")
+        self.assertEqual(client.invoke.await_count, 2)
+        username_request = client.invoke.await_args_list[0].args[0]
+        self.assertIsInstance(
+            username_request,
+            safe_forward.raw.functions.contacts.ResolveUsername,
+        )
+        self.assertEqual(username_request.username, "lembukacukan34")
+        message_request = client.invoke.await_args_list[1].args[0]
+        self.assertIsInstance(
+            message_request,
+            safe_forward.raw.functions.channels.GetMessages,
+        )
+        self.assertEqual(message_request.channel.channel_id, 4374922177)
+        self.assertEqual(message_request.id[0].id, 15636)
+
     def test_wrapper_timeout_uses_raw_api_fallback(self):
         raw_message = SimpleNamespace(empty=False, media=object())
         client = SimpleNamespace(
