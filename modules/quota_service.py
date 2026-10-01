@@ -110,7 +110,7 @@ class QuotaService:
         if db.is_premium(user_id):
             return
         db.execute(
-            "UPDATE users SET quota = MIN(quota + ?, ?) WHERE user_id = ?",
+            "UPDATE users SET quota = LEAST(quota + ?, ?) WHERE user_id = ?",
             (amount, MAX_DAILY_QUOTA, user_id),
         )
 
