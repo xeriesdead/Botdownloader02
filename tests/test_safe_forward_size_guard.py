@@ -75,19 +75,26 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
         self.assertEqual(raw_args.kwargs["peer_hint"], "@lembukacukan34")
 
     def test_raw_api_resolves_public_username_instead_of_numeric_peer(self):
-        peer = safe_forward.raw.types.InputPeerChannel(
+        stale_peer = safe_forward.raw.types.InputPeerChannel(
             channel_id=4374922177,
             access_hash=123,
         )
+        fresh_resolution = SimpleNamespace(
+            peer=safe_forward.raw.types.PeerChannel(channel_id=4374922177),
+            chats=[SimpleNamespace(id=4374922177, access_hash=456)],
+        )
         client = SimpleNamespace(
-            resolve_peer=AsyncMock(return_value=peer),
+            resolve_peer=AsyncMock(return_value=stale_peer),
             invoke=AsyncMock(
-                return_value=SimpleNamespace(
-                    messages=[object()],
-                    users=[],
-                    chats=[],
+                side_effect=[
+                    fresh_resolution,
+                    SimpleNamespace(
+                        messages=[object()],
+                        users=[],
+                        chats=[],
+                    ),
+                ]
                 )
-            ),
         )
 
         async def scenario():
@@ -105,7 +112,7 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
 
         message = asyncio.run(scenario())
         self.assertFalse(message.empty)
-        client.resolve_peer.assert_awaited_once_with("@lembukacukan34")
+        client.resolve_peer.assert_not_awaited()
         self.assertEqual(client.invoke.await_count, 2)
         username_request = client.invoke.await_args_list[0].args[0]
         self.assertIsInstance(
@@ -119,6 +126,7 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
             safe_forward.raw.functions.channels.GetMessages,
         )
         self.assertEqual(message_request.channel.channel_id, 4374922177)
+        self.assertEqual(message_request.channel.access_hash, 456)
         self.assertEqual(message_request.id[0].id, 15636)
 
     def test_wrapper_timeout_uses_raw_api_fallback(self):

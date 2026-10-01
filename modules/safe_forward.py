@@ -700,20 +700,49 @@ async def _get_message_via_raw_api(
         if isinstance(peer_hint, str) and peer_hint.startswith("@")
         else chat
     )
+    peer = None
     if isinstance(peer_to_resolve, str) and peer_to_resolve.startswith("@"):
         username = peer_to_resolve[1:]
-        await _hard_timeout(
+        resolved = await _hard_timeout(
             client.invoke(
                 raw.functions.contacts.ResolveUsername(username=username)
             ),
             timeout=_RAW_PEER_RESOLVE_TIMEOUT,
             operation=f"contacts.resolveUsername({peer_to_resolve})",
         )
-    peer = await _hard_timeout(
-        client.resolve_peer(peer_to_resolve),
-        timeout=_RAW_PEER_RESOLVE_TIMEOUT,
-        operation=f"resolve_peer({peer_to_resolve})",
-    )
+        # resolve_peer(username) can return a cached InputPeerChannel with an
+        # old access hash even after ResolveUsername has returned fresh data.
+        # Build the peer from that response instead of discarding it.
+        resolved_peer = getattr(resolved, "peer", None)
+        if isinstance(resolved_peer, raw.types.PeerChannel):
+            channel_id = resolved_peer.channel_id
+            channel = next(
+                (
+                    item
+                    for item in (getattr(resolved, "chats", None) or [])
+                    if getattr(item, "id", None) == channel_id
+                    and getattr(item, "access_hash", None) is not None
+                ),
+                None,
+            )
+            if channel is not None:
+                peer = raw.types.InputPeerChannel(
+                    channel_id=channel_id,
+                    access_hash=channel.access_hash,
+                )
+                logger.info(
+                    "[message-fetch] using fresh public peer chat=%s "
+                    "message_id=%s",
+                    chat,
+                    msg_id,
+                )
+
+    if peer is None:
+        peer = await _hard_timeout(
+            client.resolve_peer(peer_to_resolve),
+            timeout=_RAW_PEER_RESOLVE_TIMEOUT,
+            operation=f"resolve_peer({peer_to_resolve})",
+        )
     logger.info(
         "[message-fetch] raw peer resolved chat=%s message_id=%s peer_type=%s",
         chat,
