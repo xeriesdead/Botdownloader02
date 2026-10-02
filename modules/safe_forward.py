@@ -1212,6 +1212,13 @@ def _video_metadata(msg) -> dict:
     for key in ("duration", "width", "height"):
         value = getattr(video, key, None)
         if value:
+            if key == "duration":
+                try:
+                    value = int(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if value < 0:
+                    continue
             metadata[key] = value
     return metadata
 

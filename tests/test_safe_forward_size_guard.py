@@ -15,6 +15,29 @@ from modules.link_parser import is_single_message_link, parse_telegram_link
 
 
 class SafeForwardSizeGuardTests(unittest.TestCase):
+    def test_video_metadata_normalizes_duration_to_integer(self):
+        message = SimpleNamespace(
+            video=SimpleNamespace(duration=3.7, width=1280, height=720)
+        )
+
+        metadata = safe_forward._video_metadata(message)
+
+        self.assertEqual(
+            metadata,
+            {"duration": 3, "width": 1280, "height": 720},
+        )
+        self.assertIsInstance(metadata["duration"], int)
+
+    def test_video_metadata_omits_invalid_duration(self):
+        message = SimpleNamespace(
+            video=SimpleNamespace(duration="unknown", width=1280, height=720)
+        )
+
+        self.assertEqual(
+            safe_forward._video_metadata(message),
+            {"width": 1280, "height": 720},
+        )
+
     def test_reported_public_group_link_is_not_a_single_query(self):
         link = "https://t.me/lembukacucukan34/14274/"
         self.assertEqual(
