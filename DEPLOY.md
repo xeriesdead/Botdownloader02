@@ -37,7 +37,7 @@ Siapkan nilai-nilai berikut (jangan commit ke git):
 | `ADMIN_IDS` | opsional | ID Telegram admin, pisahkan koma |
 | `REQUIRED_CHANNEL` | opsional | Channel wajib join |
 | `YOUTUBE_COOKIES` | opsional | Isi file cookies.txt YouTube (Netscape format) — diperlukan jika IP server di-block YouTube. Lihat petunjuk di bawah. |
-| `MAX_FILE_SIZE_MB`, `MAX_FILE_SIZE_MB_PREMIUM`, `QUOTA_WARN_THRESHOLD` | opsional | Sudah ada default di `config.py` |
+| `MAX_FILE_SIZE_MB`, `MAX_FILE_SIZE_MB_PREMIUM`, `MAX_JOB_SIZE_MB`, `MAX_JOB_SIZE_MB_PREMIUM`, `QUOTA_WARN_THRESHOLD` | opsional | Default Free: 500 MB/media dan 1024 MB/job; Premium: 2048 MB/media dan 10240 MB/job |
 
 ### Cara mendapatkan YOUTUBE_COOKIES
 

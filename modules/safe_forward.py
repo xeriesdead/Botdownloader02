@@ -34,11 +34,37 @@ from telegram.error import BadRequest, Forbidden
 from config import (
     MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB,
     MAX_FILE_SIZE_BYTES_PREMIUM, MAX_FILE_SIZE_MB_PREMIUM,
+    MAX_JOB_SIZE_BYTES, MAX_JOB_SIZE_MB,
+    MAX_JOB_SIZE_BYTES_PREMIUM, MAX_JOB_SIZE_MB_PREMIUM,
 )
 from logger import logger
 
 MAX_RETRIES = 2
 FLOOD_LIMIT = 60
+
+
+def media_size_limit_violation(
+    largest_size: int | None,
+    total_size: int | None,
+    is_premium: bool,
+) -> str | None:
+    """Return which configured limit a media job exceeds, if any."""
+    if largest_size is None:
+        return "unknown"
+
+    media_limit = (
+        MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
+    )
+    job_limit = (
+        MAX_JOB_SIZE_BYTES_PREMIUM if is_premium else MAX_JOB_SIZE_BYTES
+    )
+    if largest_size > media_limit:
+        return "per_media"
+    if total_size is None:
+        return "unknown"
+    if total_size > job_limit:
+        return "per_job"
+    return None
 
 
 class MediaTooLargeError(RuntimeError):
@@ -901,14 +927,14 @@ async def _get_message(
         raise
 
 
-async def inspect_message_media_size(
+async def inspect_message_media_size_details(
     client, chat, msg_id: int, single_only: bool = False,
-) -> tuple[bool, int | None, bool]:
+) -> tuple[bool, int | None, int | None, bool]:
     """
     Baca metadata pesan tanpa mengunduh media.
 
-    Return (has_media, largest_file_size, is_album). A single-item link can
-    still point into an album; preserve that grouping signal even when
+    Return (has_media, largest_file_size, total_size, is_album). A single-item
+    link can still point into an album; preserve that grouping signal even when
     single_only skips expanding album metadata during pre-flight.
     """
     public_chat = isinstance(chat, str) and chat.startswith("@")
@@ -936,7 +962,7 @@ async def inspect_message_media_size(
                 exc,
                 exc_info=True,
             )
-            return True, None, single_only
+            return True, None, None, single_only
         raise
 
     if not message or message.empty:
@@ -947,7 +973,7 @@ async def inspect_message_media_size(
                 chat,
                 msg_id,
             )
-            return True, None, single_only
+            return True, None, None, single_only
         raise RuntimeError(f"Pesan `{msg_id}` kosong atau sudah dihapus.")
 
     is_album = bool(getattr(message, "media_group_id", None))
@@ -967,7 +993,7 @@ async def inspect_message_media_size(
                     exc,
                     exc_info=True,
                 )
-                return True, None, False
+                return True, None, None, False
             raise
         if not messages:
             if public_chat:
@@ -977,18 +1003,25 @@ async def inspect_message_media_size(
                     chat,
                     msg_id,
                 )
-                return True, None, False
+                return True, None, None, False
             raise RuntimeError(f"Album pesan `{msg_id}` kosong atau sudah dihapus.")
 
-    media_messages = [
-        item for item in messages
-        if getattr(item, "media", None)
-    ]
-    sizes = [
-        size for size in (_get_file_size(item) for item in media_messages)
-        if size is not None and size > 0
-    ]
-    return bool(media_messages), max(sizes, default=None), is_album
+    has_media, largest_size, total_size = _summarize_media_sizes(messages)
+    return has_media, largest_size, total_size, is_album
+
+
+async def inspect_message_media_size(
+    client, chat, msg_id: int, single_only: bool = False,
+) -> tuple[bool, int | None, bool]:
+    """Compatibility wrapper returning the original three-value summary."""
+    has_media, largest_size, _, is_album = (
+        await inspect_message_media_size_details(
+            client, chat, msg_id, single_only=single_only
+        )
+    )
+    return has_media, largest_size, is_album
+
+
 def _get_file_size(msg) -> int | None:
     """Ambil ukuran file dari pesan, atau None jika tidak ada media."""
     for attr in ("document", "video", "audio", "voice", "video_note", "sticker", "animation"):
@@ -999,6 +1032,53 @@ def _get_file_size(msg) -> int | None:
     if photo and hasattr(photo, "file_size"):
         return photo.file_size
     return None
+
+
+def _summarize_media_sizes(messages) -> tuple[bool, int | None, int | None]:
+    media_messages = [
+        item for item in messages
+        if getattr(item, "media", None)
+    ]
+    if not media_messages:
+        return False, None, None
+
+    sizes = [_get_file_size(item) for item in media_messages]
+    known_sizes = [size for size in sizes if size is not None and size > 0]
+    largest_size = max(known_sizes, default=None)
+    total_size = (
+        sum(sizes)
+        if all(size is not None and size > 0 for size in sizes)
+        else None
+    )
+    return True, largest_size, total_size
+
+
+async def inspect_media_job_size(
+    client, chat, messages,
+) -> tuple[bool, int | None, int | None]:
+    """Measure each unique media item in a request, expanding albums once."""
+    media_messages = []
+    seen_album_ids = set()
+    for message in messages or []:
+        if not getattr(message, "media", None):
+            continue
+
+        group_id = getattr(message, "media_group_id", None)
+        if group_id is None:
+            media_messages.append(message)
+            continue
+
+        if group_id in seen_album_ids:
+            continue
+        seen_album_ids.add(group_id)
+        album_messages = await _fetch_album_messages(client, chat, message.id)
+        if not album_messages:
+            raise RuntimeError("Album kosong atau tidak ditemukan.")
+        media_messages.extend(
+            item for item in album_messages if getattr(item, "media", None)
+        )
+
+    return _summarize_media_sizes(media_messages)
 
 
 def _album_download_target(msg, user_chat_id: int, album_msg_id: int,
@@ -2673,6 +2753,14 @@ class SafeForward:
                     f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
                     if is_premium else f"{MAX_FILE_SIZE_MB} MB"
                 )
+                job_limit = (
+                    MAX_JOB_SIZE_BYTES_PREMIUM
+                    if is_premium else MAX_JOB_SIZE_BYTES
+                )
+                job_label = (
+                    f"{MAX_JOB_SIZE_MB_PREMIUM} MB (Premium)"
+                    if is_premium else f"{MAX_JOB_SIZE_MB} MB (Free)"
+                )
                 largest_size = max(
                     (size for size in album_sizes if size),
                     default=0,
@@ -2687,6 +2775,13 @@ class SafeForward:
                     return False, (
                         "Ukuran salah satu media album tidak tersedia. "
                         "Album dibatalkan agar batas ukuran tetap terjaga."
+                    )
+                total_size = sum(album_sizes)
+                if total_size > job_limit:
+                    return False, (
+                        f"Total ukuran album terlalu besar "
+                        f"({_fmt_size(total_size)}). Batas total job: "
+                        f"{job_label}."
                     )
 
                 is_restricted = any(
@@ -2814,10 +2909,39 @@ class SafeForward:
         # menunggu terlalu lama pada koneksi server tertentu.
         if not skip_public_copy and isinstance(chat, str) and chat.startswith("@"):
             try:
-                if await copy_public_message(
-                    bot, user_chat_id, chat, msg_id, on_progress=on_progress
-                ):
-                    return True, None
+                has_media, largest_size, total_size, is_album = (
+                    await inspect_message_media_size_details(
+                        client, chat, msg_id, single_only=single_only
+                    )
+                )
+                if has_media and largest_size is not None:
+                    violation = media_size_limit_violation(
+                        largest_size, total_size, is_premium
+                    )
+                    if violation == "per_media":
+                        size_label = (
+                            f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
+                            if is_premium else f"{MAX_FILE_SIZE_MB} MB"
+                        )
+                        return False, (
+                            f"File terlalu besar ({_fmt_size(largest_size)}). "
+                            f"Batas maksimal: {size_label}."
+                        )
+                    if violation == "per_job":
+                        job_label = (
+                            f"{MAX_JOB_SIZE_MB_PREMIUM} MB (Premium)"
+                            if is_premium else f"{MAX_JOB_SIZE_MB} MB (Free)"
+                        )
+                        return False, (
+                            f"Total ukuran job terlalu besar "
+                            f"({_fmt_size(total_size)}). "
+                            f"Batas total job: {job_label}."
+                        )
+                if not is_album and (not has_media or largest_size is not None):
+                    if await copy_public_message(
+                        bot, user_chat_id, chat, msg_id, on_progress=on_progress
+                    ):
+                        return True, None
             except Exception:
                 # copy_public_message already logs expected failures; retain
                 # the Pyrogram fallback for unexpected integration errors.
@@ -2884,6 +3008,19 @@ class SafeForward:
             return False, (
                 f"File terlalu besar ({size_str}). "
                 f"Batas maksimal: {size_label}."
+            )
+        job_limit = (
+            MAX_JOB_SIZE_BYTES_PREMIUM
+            if is_premium else MAX_JOB_SIZE_BYTES
+        )
+        if file_size and file_size > job_limit:
+            job_label = (
+                f"{MAX_JOB_SIZE_MB_PREMIUM} MB (Premium)"
+                if is_premium else f"{MAX_JOB_SIZE_MB} MB (Free)"
+            )
+            return False, (
+                f"Total ukuran job terlalu besar ({_fmt_size(file_size)}). "
+                f"Batas total job: {job_label}."
             )
 
         is_large = bool(file_size and file_size > _BOT_API_UPLOAD_LIMIT)

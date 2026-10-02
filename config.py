@@ -37,6 +37,14 @@ MAX_FILE_SIZE_BYTES: int = MAX_FILE_SIZE_MB * 1024 * 1024
 MAX_FILE_SIZE_MB_PREMIUM: int    = int(os.getenv("MAX_FILE_SIZE_MB_PREMIUM", "2048"))
 MAX_FILE_SIZE_BYTES_PREMIUM: int = MAX_FILE_SIZE_MB_PREMIUM * 1024 * 1024
 
+# Batas total media dalam satu job (default Free 1 GB, Premium 10 GB)
+MAX_JOB_SIZE_MB: int = max(1, int(os.getenv("MAX_JOB_SIZE_MB", "1024")))
+MAX_JOB_SIZE_BYTES: int = MAX_JOB_SIZE_MB * 1024 * 1024
+MAX_JOB_SIZE_MB_PREMIUM: int = max(
+    1, int(os.getenv("MAX_JOB_SIZE_MB_PREMIUM", "10240"))
+)
+MAX_JOB_SIZE_BYTES_PREMIUM: int = MAX_JOB_SIZE_MB_PREMIUM * 1024 * 1024
+
 # Sisa quota yang memicu notifikasi (default 2)
 QUOTA_WARN_THRESHOLD: int = int(os.getenv("QUOTA_WARN_THRESHOLD", "2"))
 

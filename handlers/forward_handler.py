@@ -26,7 +26,10 @@ from modules.safe_forward import (
     SafeForward,
     check_channel_access,
     copy_public_message,
-    inspect_message_media_size,
+    inspect_media_job_size,
+    inspect_message_media_size_details,
+    media_size_limit_violation,
+    _resolve_source,
     _fmt_size,
     _hard_timeout,
 )
@@ -40,6 +43,8 @@ from config import (
     MAX_FILE_SIZE_MB,
     MAX_FILE_SIZE_BYTES_PREMIUM,
     MAX_FILE_SIZE_MB_PREMIUM,
+    MAX_JOB_SIZE_MB,
+    MAX_JOB_SIZE_MB_PREMIUM,
 )
 
 _user_last:   dict[int, float]        = {}
@@ -225,6 +230,36 @@ def setup(app):
                         refund_quota()
                         _bulk_cancel[uid] = False
                         await edit("🛑 Download dibatalkan.")
+                        return
+
+                    media_sizes = [os.path.getsize(path) for path in files]
+                    largest_size = max(media_sizes, default=0)
+                    total_size = sum(media_sizes)
+                    size_violation = media_size_limit_violation(
+                        largest_size, total_size, is_prem
+                    )
+                    if size_violation:
+                        refund_quota()
+                        if size_violation == "per_media":
+                            media_limit_mb = (
+                                MAX_FILE_SIZE_MB_PREMIUM
+                                if is_prem else MAX_FILE_SIZE_MB
+                            )
+                            await edit(
+                                "❌ <b>Media terlalu besar untuk paket kamu.</b>\n\n"
+                                f"📦 Media terbesar: <b>{_fmt_size(largest_size)}</b>\n"
+                                f"📏 Batas per media: <b>{media_limit_mb} MB</b>"
+                            )
+                        else:
+                            job_limit_mb = (
+                                MAX_JOB_SIZE_MB_PREMIUM
+                                if is_prem else MAX_JOB_SIZE_MB
+                            )
+                            await edit(
+                                "❌ <b>Total media dalam job melebihi batas.</b>\n\n"
+                                f"📦 Total ukuran: <b>{_fmt_size(total_size)}</b>\n"
+                                f"📏 Batas per-job: <b>{job_limit_mb} MB</b>"
+                            )
                         return
 
                     max_size = 50 * 1024 * 1024
@@ -490,8 +525,8 @@ def setup(app):
                         return await update.message.reply_text(err_access, parse_mode=ParseMode.HTML)
 
             try:
-                has_media, file_size, is_album = await _hard_timeout(
-                    inspect_message_media_size(
+                has_media, file_size, total_size, is_album = await _hard_timeout(
+                    inspect_message_media_size_details(
                         uc_check, chat, msg_id, single_only=single_only
                     ),
                     timeout=_PREFLIGHT_SIZE_TIMEOUT,
@@ -524,7 +559,7 @@ def setup(app):
                 f"{MAX_FILE_SIZE_MB_PREMIUM} MB (Premium)"
                 if is_prem else f"{MAX_FILE_SIZE_MB} MB (Free)"
             )
-            if has_media and file_size is None and is_album and not single_only:
+            if has_media and total_size is None and is_album and not single_only:
                 size_check_message = (
                     "⚠️ Ukuran media album belum tersedia dari Telegram.\n"
                 )
@@ -559,6 +594,29 @@ def setup(app):
                         "💎 Upgrade ke Premium untuk file hingga 2 GB."
                         if not is_prem else
                         "File Premium dibatasi maksimal 2 GB."
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+
+            if (
+                has_media
+                and media_size_limit_violation(
+                    file_size, total_size, is_prem
+                ) == "per_job"
+            ):
+                job_limit_mb = (
+                    MAX_JOB_SIZE_MB_PREMIUM if is_prem else MAX_JOB_SIZE_MB
+                )
+                return await update.message.reply_text(
+                    "❌ <b>Total media dalam job melebihi batas per-job.</b>\n\n"
+                    f"📦 Total ukuran job: <b>{_fmt_size(total_size)}</b>\n"
+                    f"📏 Batas per-job akun {'Premium' if is_prem else 'Free'}: "
+                    f"<b>{job_limit_mb} MB</b>\n"
+                    f"📏 Batas per media: <b>{size_label}</b>\n\n"
+                    + (
+                        "💎 Upgrade ke Premium untuk batas job yang lebih besar."
+                        if not is_prem else
+                        "Kurangi jumlah media atau ukuran file dalam album."
                     ),
                     parse_mode=ParseMode.HTML,
                 )
@@ -653,8 +711,10 @@ def setup(app):
 
                         try:
                             public_copy_failed = False
-                            if is_public_chat(chat) and not (
-                                has_media and file_size is None
+                            if (
+                                is_public_chat(chat)
+                                and not (has_media and file_size is None)
+                                and not (is_album and not single_only)
                             ):
                                 copied = await copy_public_message(
                                     bot, chat_id, chat, msg_id, on_progress=_progress
@@ -720,6 +780,7 @@ def setup(app):
                                         skip_public_copy=(
                                             public_copy_failed
                                             or (has_media and file_size is None)
+                                            or (is_album and not single_only)
                                         ),
                                         single_only=single_only,
                                     ),
@@ -1035,6 +1096,67 @@ def setup(app):
                         if missing > 0:
                             QuotaService.add_quota(uid, missing)
 
+                        try:
+                            has_bulk_media, largest_size, total_size = await _hard_timeout(
+                                inspect_media_job_size(
+                                    uc, bulk_source_chat, all_msgs
+                                ),
+                                timeout=max(
+                                    _PREFLIGHT_SIZE_TIMEOUT,
+                                    min(180, count * 2),
+                                ),
+                                operation=f"inspect bulk media size {chat_a}",
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Bulk media size inspection failed for %s: %s",
+                                chat_a,
+                                exc,
+                                exc_info=True,
+                            )
+                            QuotaService.add_quota(uid, len(all_msgs))
+                            await _edit_b(
+                                "⚠️ Ukuran total media belum bisa dipastikan.\n"
+                                "Job dibatalkan dan quota dikembalikan."
+                            )
+                            return
+
+                        size_violation = (
+                            media_size_limit_violation(
+                                largest_size, total_size, is_prem
+                            )
+                            if has_bulk_media else None
+                        )
+                        if size_violation:
+                            QuotaService.add_quota(uid, len(all_msgs))
+                            if size_violation == "per_media":
+                                media_limit_mb = (
+                                    MAX_FILE_SIZE_MB_PREMIUM
+                                    if is_prem else MAX_FILE_SIZE_MB
+                                )
+                                rejection = (
+                                    "❌ <b>Ada media yang melebihi batas per-media.</b>\n"
+                                    f"📦 Media terbesar: <b>{_fmt_size(largest_size)}</b>\n"
+                                    f"📏 Batas per media: <b>{media_limit_mb} MB</b>"
+                                )
+                            elif size_violation == "per_job":
+                                job_limit_mb = (
+                                    MAX_JOB_SIZE_MB_PREMIUM
+                                    if is_prem else MAX_JOB_SIZE_MB
+                                )
+                                rejection = (
+                                    "❌ <b>Total media dalam job melebihi batas.</b>\n"
+                                    f"📦 Total ukuran: <b>{_fmt_size(total_size)}</b>\n"
+                                    f"📏 Batas per-job: <b>{job_limit_mb} MB</b>"
+                                )
+                            else:
+                                rejection = (
+                                    "⚠️ Ukuran salah satu media belum tersedia.\n"
+                                    "Job dibatalkan dan quota dikembalikan."
+                                )
+                            await _edit_b(rejection)
+                            return
+
                         total          = len(all_msgs)
                         success        = 0
                         failed         = 0
@@ -1336,6 +1458,83 @@ def setup(app):
                             else "❌ Session tidak valid. Silakan /login ulang."
                         )
                         await _edit_r(message)
+                        return
+
+                    try:
+                        retry_source, source_error = await _hard_timeout(
+                            _resolve_source(uc, channel),
+                            timeout=_SESSION_LOOKUP_TIMEOUT,
+                            operation=f"resolve retry source {channel}",
+                        )
+                        if source_error:
+                            raise RuntimeError(source_error)
+                        retry_messages = await _hard_timeout(
+                            uc.get_messages(retry_source, ids_to_retry),
+                            timeout=_BULK_FETCH_TIMEOUT,
+                            operation=f"fetch retry messages {channel}",
+                        )
+                        if not isinstance(retry_messages, list):
+                            retry_messages = (
+                                [retry_messages] if retry_messages else []
+                            )
+                        has_retry_media, largest_size, total_size = await _hard_timeout(
+                            inspect_media_job_size(
+                                uc, retry_source, retry_messages
+                            ),
+                            timeout=max(
+                                _PREFLIGHT_SIZE_TIMEOUT,
+                                min(180, n * 2),
+                            ),
+                            operation=f"inspect retry media size {channel}",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Retry media size inspection failed for %s: %s",
+                            channel,
+                            exc,
+                            exc_info=True,
+                        )
+                        QuotaService.add_quota(uid, n)
+                        await _edit_r(
+                            "⚠️ Ukuran total media belum bisa dipastikan.\n"
+                            "Retry dibatalkan dan quota dikembalikan."
+                        )
+                        return
+
+                    size_violation = (
+                        media_size_limit_violation(
+                            largest_size, total_size, is_prem
+                        )
+                        if has_retry_media else None
+                    )
+                    if size_violation:
+                        QuotaService.add_quota(uid, n)
+                        if size_violation == "per_media":
+                            media_limit_mb = (
+                                MAX_FILE_SIZE_MB_PREMIUM
+                                if is_prem else MAX_FILE_SIZE_MB
+                            )
+                            rejection = (
+                                "❌ <b>Ada media yang melebihi batas per-media.</b>\n"
+                                f"📦 Media terbesar: <b>{_fmt_size(largest_size)}</b>\n"
+                                f"📏 Batas per media: <b>{media_limit_mb} MB</b>"
+                            )
+                        elif size_violation == "per_job":
+                            job_limit_mb = (
+                                MAX_JOB_SIZE_MB_PREMIUM
+                                if is_prem else MAX_JOB_SIZE_MB
+                            )
+                            rejection = (
+                                "❌ <b>Total media dalam job melebihi batas.</b>\n"
+                                f"📦 Total ukuran: <b>{_fmt_size(total_size)}</b>\n"
+                                f"📏 Batas per-job: <b>{job_limit_mb} MB</b>"
+                            )
+                        else:
+                            rejection = (
+                                "⚠️ Ukuran salah satu media belum tersedia.\n"
+                                "Retry dibatalkan dan quota dikembalikan."
+                            )
+                        await _edit_r(rejection)
                         return
 
                     success        = 0

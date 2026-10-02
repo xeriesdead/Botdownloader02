@@ -15,6 +15,63 @@ from modules.link_parser import is_single_message_link, parse_telegram_link
 
 
 class SafeForwardSizeGuardTests(unittest.TestCase):
+    def test_per_media_and_per_job_limits_are_independent(self):
+        with patch.multiple(
+            safe_forward,
+            MAX_FILE_SIZE_BYTES=500,
+            MAX_JOB_SIZE_BYTES=1000,
+            MAX_FILE_SIZE_BYTES_PREMIUM=2000,
+            MAX_JOB_SIZE_BYTES_PREMIUM=10000,
+        ):
+            self.assertEqual(
+                safe_forward.media_size_limit_violation(300, 3000, False),
+                "per_job",
+            )
+            self.assertIsNone(
+                safe_forward.media_size_limit_violation(500, 1000, False)
+            )
+            self.assertEqual(
+                safe_forward.media_size_limit_violation(501, 501, False),
+                "per_media",
+            )
+            self.assertIsNone(
+                safe_forward.media_size_limit_violation(2000, 10000, True)
+            )
+            self.assertEqual(
+                safe_forward.media_size_limit_violation(2001, 2001, True),
+                "per_media",
+            )
+            self.assertEqual(
+                safe_forward.media_size_limit_violation(2000, 10001, True),
+                "per_job",
+            )
+
+    def test_single_public_media_respects_job_limit_before_copy(self):
+        async def scenario():
+            with (
+                patch.object(safe_forward, "MAX_FILE_SIZE_BYTES", 500),
+                patch.object(safe_forward, "MAX_JOB_SIZE_BYTES", 100),
+                patch.object(
+                    safe_forward,
+                    "inspect_message_media_size_details",
+                    new=AsyncMock(return_value=(True, 150, 150, False)),
+                ),
+                patch.object(
+                    safe_forward,
+                    "copy_public_message",
+                    new=AsyncMock(return_value=True),
+                ) as copy_public,
+            ):
+                result = await safe_forward.SafeForward.run(
+                    object(), object(), 456, "@publicgroup", 1
+                )
+                return result, copy_public
+
+        result, copy_public = asyncio.run(scenario())
+        self.assertFalse(result[0])
+        self.assertIn("total ukuran job", result[1].lower())
+        copy_public.assert_not_awaited()
+
     def test_video_metadata_normalizes_duration_to_integer(self):
         message = SimpleNamespace(
             video=SimpleNamespace(duration=3.7, width=1280, height=720)
@@ -444,6 +501,96 @@ class SafeForwardSizeGuardTests(unittest.TestCase):
                 self.assertFalse(ok)
                 self.assertIn(expected_reason, reason)
                 self.assertEqual((copy_count, bot_count, stream_count), (0, 0, 0))
+
+    def test_album_total_job_limit_rejects_before_any_send(self):
+        megabyte = 1024 * 1024
+        album = [
+            SimpleNamespace(
+                id=index,
+                empty=False,
+                media_group_id="album-large-total",
+                media=object(),
+                video=SimpleNamespace(file_size=300 * megabyte),
+                has_protected_content=False,
+            )
+            for index in range(1, 5)
+        ]
+
+        async def scenario():
+            with (
+                patch.object(
+                    safe_forward,
+                    "MAX_JOB_SIZE_BYTES",
+                    1024 * megabyte,
+                ),
+                patch.object(
+                    safe_forward,
+                    "_resolve_source",
+                    new=AsyncMock(return_value=(12345, None)),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_fetch_album_messages",
+                    new=AsyncMock(return_value=album),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_copy_public_album",
+                    new=AsyncMock(return_value=None),
+                ) as copy_album,
+                patch.object(
+                    safe_forward,
+                    "_send_album_via_bot",
+                    new=AsyncMock(return_value=(True, None)),
+                ) as send_via_bot,
+                patch.object(
+                    safe_forward,
+                    "_send_album_streaming_individually",
+                    new=AsyncMock(return_value=(True, None)),
+                ) as stream_album,
+            ):
+                result = await safe_forward.SafeForward.run_album(
+                    object(), object(), 456, "@publicgroup", 1
+                )
+                return result, copy_album, send_via_bot, stream_album
+
+        result, copy_album, send_via_bot, stream_album = asyncio.run(scenario())
+        self.assertFalse(result[0])
+        self.assertIn("Total ukuran album", result[1])
+        copy_album.assert_not_awaited()
+        send_via_bot.assert_not_awaited()
+        stream_album.assert_not_awaited()
+
+    def test_job_size_summary_expands_each_album_only_once(self):
+        album = [
+            SimpleNamespace(
+                id=index,
+                media_group_id="album-1",
+                media=object(),
+                video=SimpleNamespace(file_size=300),
+            )
+            for index in range(1, 11)
+        ]
+        standalone = SimpleNamespace(
+            id=11,
+            media=object(),
+            video=SimpleNamespace(file_size=100),
+        )
+
+        async def scenario():
+            with patch.object(
+                safe_forward,
+                "_fetch_album_messages",
+                new=AsyncMock(return_value=album),
+            ) as fetch_album:
+                result = await safe_forward.inspect_media_job_size(
+                    object(), 12345, [album[0], album[1], standalone]
+                )
+                return result, fetch_album.await_count
+
+        result, fetch_count = asyncio.run(scenario())
+        self.assertEqual(result, (True, 300, 3100))
+        self.assertEqual(fetch_count, 1)
 
     def test_public_single_preflight_timeout_is_not_queued_as_unknown_size(self):
         async def scenario():
