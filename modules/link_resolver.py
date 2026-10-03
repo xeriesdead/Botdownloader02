@@ -139,7 +139,11 @@ def _request_destination(source_url: str, api_key: str) -> str:
     try:
         with urlopen(request, timeout=_REQUEST_TIMEOUT) as response:
             body = response.read(_MAX_RESPONSE_BYTES + 1)
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+    except HTTPError as exc:
+        raise LinkResolverError(
+            f"Resolver API returned HTTP {exc.code}"
+        ) from exc
+    except (URLError, TimeoutError, OSError) as exc:
         raise LinkResolverError("Resolver API request failed") from exc
 
     if len(body) > _MAX_RESPONSE_BYTES:

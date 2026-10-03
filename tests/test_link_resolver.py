@@ -1,6 +1,7 @@
 import asyncio
 import json
 import unittest
+from urllib.error import HTTPError
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -96,6 +97,31 @@ class LinkResolverTests(unittest.TestCase):
                         "test-api-key",
                     )
                 )
+
+    def test_reports_http_status_without_exposing_request_details(self):
+        for status in (401, 429):
+            with self.subTest(status=status):
+                error = HTTPError(
+                    "https://api.zapi.ink",
+                    status,
+                    "Upstream error",
+                    {},
+                    None,
+                )
+                with patch(
+                    "modules.link_resolver.urlopen",
+                    side_effect=error,
+                ):
+                    with self.assertRaisesRegex(
+                        link_resolver.LinkResolverError,
+                        f"HTTP {status}",
+                    ):
+                        asyncio.run(
+                            link_resolver.resolve_rentry_url(
+                                "https://link-center.net/642509/slug",
+                                "test-api-key",
+                            )
+                        )
 
     def test_rejects_unsupported_source_before_request(self):
         with patch("modules.link_resolver.urlopen") as open_url:

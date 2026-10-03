@@ -122,9 +122,9 @@ def setup(app):
                     )
                 except LinkResolverError as exc:
                     logger.warning(
-                        "Link resolver failed uid=%s error=%s",
+                        "Link resolver failed uid=%s: %s",
                         uid,
-                        type(exc).__name__,
+                        exc,
                     )
                     await update.message.reply_text(
                         "❌ URL Rentry tidak bisa ditemukan. Link mungkin "
