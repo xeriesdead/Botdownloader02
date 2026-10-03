@@ -33,7 +33,7 @@ def setup(app):
             "  <i>Video dan foto/carousel didukung.</i>\n\n"
             "<b>Link Singkat</b>\n"
             "• Kirim link Linkvertise atau link-center di chat; bot akan membalas "
-            "URL Rentry jika tersedia.\n\n"
+            "URL tujuan setelah link singkat diproses.\n\n"
             "• /canceldownload — batalkan download yang sedang berjalan\n\n"
             "<b>Akun &amp; Quota</b>\n"
             "• /status — lihat quota &amp; status\n"

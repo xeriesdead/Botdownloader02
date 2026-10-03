@@ -28,7 +28,7 @@ _KNOWN_RENTRY_DESTINATIONS = {
 
 
 class LinkResolverError(Exception):
-    """The external resolver could not return a usable Rentry URL."""
+    """The external resolver could not return a usable destination URL."""
 
 
 class LinkResolverNotConfigured(LinkResolverError):
@@ -70,11 +70,14 @@ def extract_linkvertise_url(text: str) -> str | None:
     return None
 
 
-def _validated_rentry_url(url: str) -> str | None:
+def _validated_destination_url(url: str) -> str | None:
     candidate = url.strip().rstrip(".,;!?)")
     try:
         parsed = urlsplit(candidate)
         hostname = (parsed.hostname or "").lower().rstrip(".")
+        normalized_hostname = (
+            hostname[4:] if hostname.startswith("www.") else hostname
+        )
         port = parsed.port
     except ValueError:
         return None
@@ -83,8 +86,9 @@ def _validated_rentry_url(url: str) -> str | None:
         parsed.scheme.lower() not in {"http", "https"}
         or parsed.username is not None
         or parsed.password is not None
-        or hostname not in _Rentry_HOSTS
-        or not parsed.path.strip("/")
+        or not hostname
+        or any(char.isspace() for char in hostname)
+        or normalized_hostname in _LINKVERTISE_HOSTS
     ):
         return None
 
@@ -92,15 +96,17 @@ def _validated_rentry_url(url: str) -> str | None:
     if port is not None and port != default_port:
         return None
 
-    return urlunsplit(("https", "rentry.co", parsed.path, parsed.query, parsed.fragment))
+    if hostname in _Rentry_HOSTS or normalized_hostname == "rentry.co":
+        return urlunsplit(("https", "rentry.co", parsed.path, parsed.query, parsed.fragment))
+    return candidate
 
 
-def _find_rentry_url(payload, depth: int = 0) -> str | None:
+def _find_destination_url(payload, depth: int = 0) -> str | None:
     if depth > 8:
         return None
 
     if isinstance(payload, str):
-        return _validated_rentry_url(payload)
+        return _validated_destination_url(payload)
 
     if isinstance(payload, dict):
         preferred_keys = (
@@ -114,16 +120,28 @@ def _find_rentry_url(payload, depth: int = 0) -> str | None:
         )
         for key in preferred_keys:
             if key in payload:
-                found = _find_rentry_url(payload[key], depth + 1)
+                found = _find_destination_url(payload[key], depth + 1)
                 if found:
                     return found
-        for value in payload.values():
-            found = _find_rentry_url(value, depth + 1)
+        source_keys = {
+            "inputurl",
+            "input_url",
+            "sourceurl",
+            "source_url",
+            "originalurl",
+            "original_url",
+            "shorturl",
+            "short_url",
+        }
+        for key, value in payload.items():
+            if key.lower() in source_keys:
+                continue
+            found = _find_destination_url(value, depth + 1)
             if found:
                 return found
     elif isinstance(payload, list):
         for value in payload:
-            found = _find_rentry_url(value, depth + 1)
+            found = _find_destination_url(value, depth + 1)
             if found:
                 return found
 
@@ -149,6 +167,8 @@ def _network_error_message(exc: Exception) -> str:
 def _resolver_input_url(source_url: str) -> str:
     parsed = urlsplit(source_url)
     hostname = (parsed.hostname or "").lower().rstrip(".")
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
     path_parts = [part for part in parsed.path.split("/") if part]
     if (
         hostname == "linkvertise.com"
@@ -188,14 +208,14 @@ def _request_destination(source_url: str, api_key: str) -> str:
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise LinkResolverError("Resolver API returned invalid JSON") from exc
 
-    destination = _find_rentry_url(payload)
+    destination = _find_destination_url(payload)
     if not destination:
-        raise LinkResolverError("Resolver did not return a Rentry URL")
+        raise LinkResolverError("Resolver did not return a usable destination URL")
     return destination
 
 
-async def resolve_rentry_url(source_url: str, api_key: str | None) -> str:
-    """Resolve a supported short link and return only an https://rentry.co URL."""
+async def resolve_destination_url(source_url: str, api_key: str | None) -> str:
+    """Resolve a supported short link and return its safe HTTP(S) destination."""
     validated_source = _validated_url(source_url, _LINKVERTISE_HOSTS)
     if not validated_source:
         raise LinkResolverError("Unsupported source URL")

@@ -17,7 +17,7 @@ from modules.link_resolver import (
     LinkResolverError,
     LinkResolverNotConfigured,
     extract_linkvertise_url,
-    resolve_rentry_url,
+    resolve_destination_url,
 )
 from logger import logger
 
@@ -112,11 +112,11 @@ def setup(app):
                     return
                 status_message = await update.message.reply_text(
                     "🔎 Memeriksa tautan...\n"
-                    "Sedang mencari tujuan Rentry yang valid.",
+                    "Sedang mencari tujuan tautan.",
                     disable_web_page_preview=True,
                 )
                 try:
-                    rentry_url = await resolve_rentry_url(
+                    destination_url = await resolve_destination_url(
                         link_url,
                         LINK_RESOLVER_API_KEY,
                     )
@@ -132,12 +132,12 @@ def setup(app):
                         exc,
                     )
                     await status_message.edit_text(
-                        "❌ URL Rentry tidak bisa ditemukan. "
+                        "❌ Tujuan tautan tidak bisa ditemukan. "
                         f"Detail: {exc}"
                     )
                 else:
                     await status_message.edit_text(
-                        rentry_url,
+                        destination_url,
                         disable_web_page_preview=True,
                     )
                 return

@@ -44,21 +44,32 @@ class LinkResolverTests(unittest.TestCase):
 
     def test_resolves_linkvertise_access_path_using_documented_bare_format(self):
         response = _FakeResponse({
-            "url": "https://rentry.co/mz7v7bio",
+            "data": {
+                "url": "https://panelhenil-oss.github.io/UPD/",
+                "inputUrl": "https://linkvertise.com/access/1239053/engobhM4ZGTH",
+            },
         })
         with patch("modules.link_resolver.urlopen", return_value=response) as open_url:
             result = asyncio.run(
-                link_resolver.resolve_rentry_url(
+                link_resolver.resolve_destination_url(
                     "https://linkvertise.com/access/1239053/engobhM4ZGTH",
                     "test-api-key",
                 )
             )
 
-        self.assertEqual(result, "https://rentry.co/mz7v7bio")
+        self.assertEqual(result, "https://panelhenil-oss.github.io/UPD/")
         request = open_url.call_args.args[0]
         self.assertEqual(
             parse_qs(urlsplit(request.full_url).query)["url"],
             ["1239053/engobhM4ZGTH"],
+        )
+
+    def test_normalizes_www_linkvertise_access_host(self):
+        self.assertEqual(
+            link_resolver._resolver_input_url(
+                "https://www.linkvertise.com/access/1239053/engobhM4ZGTH"
+            ),
+            "1239053/engobhM4ZGTH",
         )
 
     def test_rejects_lookalike_and_arbitrary_hosts(self):
@@ -76,7 +87,7 @@ class LinkResolverTests(unittest.TestCase):
     def test_requires_api_key_before_making_request(self):
         with self.assertRaises(link_resolver.LinkResolverNotConfigured):
             asyncio.run(
-                link_resolver.resolve_rentry_url(
+                link_resolver.resolve_destination_url(
                     "https://link-center.net/642509/slug",
                     None,
                 )
@@ -85,7 +96,7 @@ class LinkResolverTests(unittest.TestCase):
     def test_resolves_known_link_center_url_without_api_key(self):
         with patch("modules.link_resolver.urlopen") as open_url:
             result = asyncio.run(
-                link_resolver.resolve_rentry_url(
+                link_resolver.resolve_destination_url(
                     "https://link-center.net/642509/SH7kRb7idos3",
                     None,
                 )
@@ -94,7 +105,7 @@ class LinkResolverTests(unittest.TestCase):
         self.assertEqual(result, "https://rentry.co/mz7v7bio")
         open_url.assert_not_called()
 
-    def test_resolves_and_returns_only_canonical_rentry_url(self):
+    def test_canonicalizes_rentry_destination_to_https(self):
         response = _FakeResponse({
             "project": "linkvertise",
             "data": {
@@ -104,7 +115,7 @@ class LinkResolverTests(unittest.TestCase):
         })
         with patch("modules.link_resolver.urlopen", return_value=response) as open_url:
             result = asyncio.run(
-                link_resolver.resolve_rentry_url(
+                link_resolver.resolve_destination_url(
                     "https://link-center.net/642509/slug",
                     "test-api-key",
                 )
@@ -118,14 +129,20 @@ class LinkResolverTests(unittest.TestCase):
         )
         self.assertEqual(request.get_header("X-api-key"), "test-api-key")
 
-    def test_does_not_return_non_rentry_destination(self):
+    def test_does_not_return_linkvertise_input_as_destination(self):
         response = _FakeResponse({
-            "data": {"url": "https://mega.nz/folder/example"},
+            "data": {
+                "inputUrl": "https://linkvertise.com/access/1239053/engobhM4ZGTH",
+                "source_url": "https://linkvertise.com/access/1239053/engobhM4ZGTH",
+            },
         })
         with patch("modules.link_resolver.urlopen", return_value=response):
-            with self.assertRaises(link_resolver.LinkResolverError):
+            with self.assertRaisesRegex(
+                link_resolver.LinkResolverError,
+                "usable destination URL",
+            ):
                 asyncio.run(
-                    link_resolver.resolve_rentry_url(
+                    link_resolver.resolve_destination_url(
                         "https://link-center.net/642509/slug",
                         "test-api-key",
                     )
@@ -150,11 +167,25 @@ class LinkResolverTests(unittest.TestCase):
                         f"HTTP {status}",
                     ):
                         asyncio.run(
-                            link_resolver.resolve_rentry_url(
+                            link_resolver.resolve_destination_url(
                                 "https://link-center.net/642509/slug",
                                 "test-api-key",
                             )
                         )
+
+    def test_rejects_unsupported_destination_schemes(self):
+        response = _FakeResponse({"data": {"url": "javascript:alert(1)"}})
+        with patch("modules.link_resolver.urlopen", return_value=response):
+            with self.assertRaisesRegex(
+                link_resolver.LinkResolverError,
+                "usable destination URL",
+            ):
+                asyncio.run(
+                    link_resolver.resolve_destination_url(
+                        "https://link-center.net/642509/slug",
+                        "test-api-key",
+                    )
+                )
 
     def test_reports_safe_network_failure_details(self):
         cases = (
@@ -173,7 +204,7 @@ class LinkResolverTests(unittest.TestCase):
                         expected,
                     ):
                         asyncio.run(
-                            link_resolver.resolve_rentry_url(
+                            link_resolver.resolve_destination_url(
                                 "https://link-center.net/642509/slug",
                                 "test-api-key",
                             )
@@ -183,7 +214,7 @@ class LinkResolverTests(unittest.TestCase):
         with patch("modules.link_resolver.urlopen") as open_url:
             with self.assertRaises(link_resolver.LinkResolverError):
                 asyncio.run(
-                    link_resolver.resolve_rentry_url(
+                    link_resolver.resolve_destination_url(
                         "https://example.org/642509/slug",
                         "test-api-key",
                     )
