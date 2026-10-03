@@ -6,4 +6,5 @@
 - [GitHub API fallback](github-api-fallback.md) — when the HTTPS Git remote rejects stale credentials, use the installed GitHub connection to publish the commit safely.
 - [Album completion status](album-transfer-completion.md) — force the final progress update and avoid expensive custom thumbnails for very large videos.
 - [Railway and GitHub workflow](railway-github-workflow.md) — keep this bot on Railway and push each agent-made change to GitHub.
+- [Link shortener destinations](link-shortener-destinations.md) — resolve supported shortlinks to any final destination domain, not only Rentry.
 - [Python dependency setup](python-dependency-setup.md) — avoid the standalone `telegram` package; verify Replit package installs did not duplicate requirements.
