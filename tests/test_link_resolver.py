@@ -1,7 +1,9 @@
 import asyncio
 import json
+import socket
+import ssl
 import unittest
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -115,6 +117,29 @@ class LinkResolverTests(unittest.TestCase):
                     with self.assertRaisesRegex(
                         link_resolver.LinkResolverError,
                         f"HTTP {status}",
+                    ):
+                        asyncio.run(
+                            link_resolver.resolve_rentry_url(
+                                "https://link-center.net/642509/slug",
+                                "test-api-key",
+                            )
+                        )
+
+    def test_reports_safe_network_failure_details(self):
+        cases = (
+            (TimeoutError("socket timed out"), "request timed out"),
+            (socket.gaierror(-3, "temporary DNS failure"), "DNS lookup failed"),
+            (ssl.SSLError("TLS handshake failed"), "TLS connection failed"),
+        )
+        for reason, expected in cases:
+            with self.subTest(expected=expected):
+                with patch(
+                    "modules.link_resolver.urlopen",
+                    side_effect=URLError(reason),
+                ):
+                    with self.assertRaisesRegex(
+                        link_resolver.LinkResolverError,
+                        expected,
                     ):
                         asyncio.run(
                             link_resolver.resolve_rentry_url(

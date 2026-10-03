@@ -1,13 +1,15 @@
 import asyncio
 import json
 import re
+import socket
+import ssl
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
 _API_URL = "https://api.zapi.ink/v1/bypass-tools:linkvertise/resolve"
-_REQUEST_TIMEOUT = 15
+_REQUEST_TIMEOUT = 30
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 _LINKVERTISE_HOSTS = frozenset({
@@ -125,6 +127,22 @@ def _find_rentry_url(payload, depth: int = 0) -> str | None:
     return None
 
 
+def _network_error_message(exc: Exception) -> str:
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    if isinstance(reason, TimeoutError):
+        return "Resolver API request timed out"
+    if isinstance(reason, socket.gaierror):
+        return "Resolver DNS lookup failed"
+    if isinstance(reason, ssl.SSLError):
+        return "Resolver TLS connection failed"
+
+    error_type = type(reason).__name__
+    error_number = getattr(reason, "errno", None)
+    if error_number is not None:
+        return f"Resolver API network error ({error_type}, errno={error_number})"
+    return f"Resolver API network error ({error_type})"
+
+
 def _request_destination(source_url: str, api_key: str) -> str:
     request_url = f"{_API_URL}?{urlencode({'url': source_url})}"
     request = Request(
@@ -144,7 +162,7 @@ def _request_destination(source_url: str, api_key: str) -> str:
             f"Resolver API returned HTTP {exc.code}"
         ) from exc
     except (URLError, TimeoutError, OSError) as exc:
-        raise LinkResolverError("Resolver API request failed") from exc
+        raise LinkResolverError(_network_error_message(exc)) from exc
 
     if len(body) > _MAX_RESPONSE_BYTES:
         raise LinkResolverError("Resolver API response was too large")
