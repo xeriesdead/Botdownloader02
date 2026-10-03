@@ -42,6 +42,25 @@ class LinkResolverTests(unittest.TestCase):
             "https://linkvertise.com/642509/SH7kRb7idos3",
         )
 
+    def test_resolves_linkvertise_access_path_using_documented_bare_format(self):
+        response = _FakeResponse({
+            "url": "https://rentry.co/mz7v7bio",
+        })
+        with patch("modules.link_resolver.urlopen", return_value=response) as open_url:
+            result = asyncio.run(
+                link_resolver.resolve_rentry_url(
+                    "https://linkvertise.com/access/1239053/engobhM4ZGTH",
+                    "test-api-key",
+                )
+            )
+
+        self.assertEqual(result, "https://rentry.co/mz7v7bio")
+        request = open_url.call_args.args[0]
+        self.assertEqual(
+            parse_qs(urlsplit(request.full_url).query)["url"],
+            ["1239053/engobhM4ZGTH"],
+        )
+
     def test_rejects_lookalike_and_arbitrary_hosts(self):
         self.assertIsNone(
             link_resolver.extract_linkvertise_url(

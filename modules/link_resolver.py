@@ -146,8 +146,21 @@ def _network_error_message(exc: Exception) -> str:
     return f"Resolver API network error ({error_type})"
 
 
+def _resolver_input_url(source_url: str) -> str:
+    parsed = urlsplit(source_url)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if (
+        hostname == "linkvertise.com"
+        and len(path_parts) == 3
+        and path_parts[0].lower() == "access"
+    ):
+        return f"{path_parts[1]}/{path_parts[2]}"
+    return source_url
+
+
 def _request_destination(source_url: str, api_key: str) -> str:
-    request_url = f"{_API_URL}?{urlencode({'url': source_url})}"
+    request_url = f"{_API_URL}?{urlencode({'url': _resolver_input_url(source_url)})}"
     request = Request(
         request_url,
         headers={

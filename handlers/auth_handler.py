@@ -132,8 +132,8 @@ def setup(app):
                         exc,
                     )
                     await status_message.edit_text(
-                        "❌ URL Rentry tidak bisa ditemukan. Link mungkin "
-                        "kedaluwarsa atau layanan resolver sedang tidak tersedia."
+                        "❌ URL Rentry tidak bisa ditemukan. "
+                        f"Detail: {exc}"
                     )
                 else:
                     await status_message.edit_text(
