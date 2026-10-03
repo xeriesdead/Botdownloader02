@@ -110,13 +110,18 @@ def setup(app):
             if link_url:
                 if not await require_member(context.bot, update):
                     return
+                status_message = await update.message.reply_text(
+                    "🔎 Memeriksa tautan...\n"
+                    "Sedang mencari tujuan Rentry yang valid.",
+                    disable_web_page_preview=True,
+                )
                 try:
                     rentry_url = await resolve_rentry_url(
                         link_url,
                         LINK_RESOLVER_API_KEY,
                     )
                 except LinkResolverNotConfigured:
-                    await update.message.reply_text(
+                    await status_message.edit_text(
                         "⚙️ Fitur resolver belum aktif. Pengelola bot perlu "
                         "mengatur LINK_RESOLVER_API_KEY di Railway."
                     )
@@ -126,12 +131,12 @@ def setup(app):
                         uid,
                         exc,
                     )
-                    await update.message.reply_text(
+                    await status_message.edit_text(
                         "❌ URL Rentry tidak bisa ditemukan. Link mungkin "
                         "kedaluwarsa atau layanan resolver sedang tidak tersedia."
                     )
                 else:
-                    await update.message.reply_text(
+                    await status_message.edit_text(
                         rentry_url,
                         disable_web_page_preview=True,
                     )
