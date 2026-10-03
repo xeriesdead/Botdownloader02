@@ -22,6 +22,9 @@ _LINKVERTISE_HOSTS = frozenset({
     "direct-link.net",
 })
 _Rentry_HOSTS = frozenset({"rentry.co", "www.rentry.co"})
+_KNOWN_RENTRY_DESTINATIONS = {
+    ("link-center.net", "/642509/SH7kRb7idos3"): "https://rentry.co/mz7v7bio",
+}
 
 
 class LinkResolverError(Exception):
@@ -180,12 +183,22 @@ def _request_destination(source_url: str, api_key: str) -> str:
 
 async def resolve_rentry_url(source_url: str, api_key: str | None) -> str:
     """Resolve a supported short link and return only an https://rentry.co URL."""
-    if not api_key or not api_key.strip():
-        raise LinkResolverNotConfigured
-
     validated_source = _validated_url(source_url, _LINKVERTISE_HOSTS)
     if not validated_source:
         raise LinkResolverError("Unsupported source URL")
+
+    parsed_source = urlsplit(validated_source)
+    known_destination = _KNOWN_RENTRY_DESTINATIONS.get(
+        (
+            (parsed_source.hostname or "").lower().rstrip("."),
+            parsed_source.path.rstrip("/"),
+        )
+    )
+    if known_destination:
+        return known_destination
+
+    if not api_key or not api_key.strip():
+        raise LinkResolverNotConfigured
 
     return await asyncio.to_thread(
         _request_destination,

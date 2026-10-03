@@ -63,6 +63,18 @@ class LinkResolverTests(unittest.TestCase):
                 )
             )
 
+    def test_resolves_known_link_center_url_without_api_key(self):
+        with patch("modules.link_resolver.urlopen") as open_url:
+            result = asyncio.run(
+                link_resolver.resolve_rentry_url(
+                    "https://link-center.net/642509/SH7kRb7idos3",
+                    None,
+                )
+            )
+
+        self.assertEqual(result, "https://rentry.co/mz7v7bio")
+        open_url.assert_not_called()
+
     def test_resolves_and_returns_only_canonical_rentry_url(self):
         response = _FakeResponse({
             "project": "linkvertise",
