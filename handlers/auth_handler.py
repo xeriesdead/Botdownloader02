@@ -7,12 +7,18 @@ from pyrogram.errors import (
     PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired,
     SessionPasswordNeeded, PasswordHashInvalid, FloodWait,
 )
-from config import API_ID, API_HASH
+from config import API_ID, API_HASH, LINK_RESOLVER_API_KEY
 from database.db import db
 from modules.session_manager import session_manager
 from modules.channel_guard import require_member
 from modules.social_downloader import is_social_link
 from modules.link_parser import parse_telegram_link
+from modules.link_resolver import (
+    LinkResolverError,
+    LinkResolverNotConfigured,
+    extract_linkvertise_url,
+    resolve_rentry_url,
+)
 from logger import logger
 
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -100,6 +106,37 @@ def setup(app):
         st   = _state.get(uid)
 
         if not st:
+            link_url = extract_linkvertise_url(text)
+            if link_url:
+                if not await require_member(context.bot, update):
+                    return
+                try:
+                    rentry_url = await resolve_rentry_url(
+                        link_url,
+                        LINK_RESOLVER_API_KEY,
+                    )
+                except LinkResolverNotConfigured:
+                    await update.message.reply_text(
+                        "⚙️ Fitur resolver belum aktif. Pengelola bot perlu "
+                        "mengatur LINK_RESOLVER_API_KEY di Railway."
+                    )
+                except LinkResolverError as exc:
+                    logger.warning(
+                        "Link resolver failed uid=%s error=%s",
+                        uid,
+                        type(exc).__name__,
+                    )
+                    await update.message.reply_text(
+                        "❌ URL Rentry tidak bisa ditemukan. Link mungkin "
+                        "kedaluwarsa atau layanan resolver sedang tidak tersedia."
+                    )
+                else:
+                    await update.message.reply_text(
+                        rentry_url,
+                        disable_web_page_preview=True,
+                    )
+                return
+
             # ── Deteksi link sosmed / Telegram → sarankan /get ──────────────
             url = _extract_downloadable_url(text)
             if url:

@@ -73,6 +73,10 @@ COBALT_API_KEY: str | None = os.getenv("COBALT_API_KEY") or None
 # Jika tidak diset, perintah /faceswap dan /imagine akan menampilkan pesan error.
 FAL_KEY: str | None = os.getenv("FAL_KEY") or None
 
+# API resolver untuk tautan Linkvertise/link-center.
+# Jika tidak diisi, penanganan tautan ini memberi pesan bahwa fitur belum aktif.
+LINK_RESOLVER_API_KEY: str | None = os.getenv("LINK_RESOLVER_API_KEY") or None
+
 # Cookies Instagram untuk yt-dlp (Netscape format, opsional).
 # Cara mendapatkan: export cookies dari browser saat login Instagram
 # menggunakan ekstensi "Get cookies.txt LOCALLY", lalu paste isinya
