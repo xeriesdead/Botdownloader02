@@ -1,15 +1,19 @@
 import asyncio
+import errno
 import json
 import re
 import socket
 import ssl
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
 _API_URL = "https://api.zapi.ink/v1/bypass-tools:linkvertise/resolve"
-_REQUEST_TIMEOUT = 30
+_REQUEST_TIMEOUT = 60
+_TIMEOUT_RETRIES = 1
+_TIMEOUT_RETRY_DELAY = 1
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 _LINKVERTISE_HOSTS = frozenset({
@@ -164,6 +168,14 @@ def _network_error_message(exc: Exception) -> str:
     return f"Resolver API network error ({error_type})"
 
 
+def _is_timeout_error(exc: Exception) -> bool:
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    return (
+        isinstance(reason, TimeoutError)
+        or getattr(reason, "errno", None) == errno.ETIMEDOUT
+    )
+
+
 def _resolver_input_url(source_url: str) -> str:
     parsed = urlsplit(source_url)
     hostname = (parsed.hostname or "").lower().rstrip(".")
@@ -190,15 +202,20 @@ def _request_destination(source_url: str, api_key: str) -> str:
         },
     )
 
-    try:
-        with urlopen(request, timeout=_REQUEST_TIMEOUT) as response:
-            body = response.read(_MAX_RESPONSE_BYTES + 1)
-    except HTTPError as exc:
-        raise LinkResolverError(
-            f"Resolver API returned HTTP {exc.code}"
-        ) from exc
-    except (URLError, TimeoutError, OSError) as exc:
-        raise LinkResolverError(_network_error_message(exc)) from exc
+    for attempt in range(_TIMEOUT_RETRIES + 1):
+        try:
+            with urlopen(request, timeout=_REQUEST_TIMEOUT) as response:
+                body = response.read(_MAX_RESPONSE_BYTES + 1)
+            break
+        except HTTPError as exc:
+            raise LinkResolverError(
+                f"Resolver API returned HTTP {exc.code}"
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            if _is_timeout_error(exc) and attempt < _TIMEOUT_RETRIES:
+                time.sleep(_TIMEOUT_RETRY_DELAY)
+                continue
+            raise LinkResolverError(_network_error_message(exc)) from exc
 
     if len(body) > _MAX_RESPONSE_BYTES:
         raise LinkResolverError("Resolver API response was too large")

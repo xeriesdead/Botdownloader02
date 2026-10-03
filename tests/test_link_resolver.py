@@ -210,6 +210,35 @@ class LinkResolverTests(unittest.TestCase):
                             )
                         )
 
+    def test_retries_once_after_resolver_timeout(self):
+        response = _FakeResponse({
+            "url": "https://panelhenil-oss.github.io/UPD/",
+        })
+        with (
+            patch(
+                "modules.link_resolver.urlopen",
+                side_effect=[
+                    URLError(TimeoutError("socket timed out")),
+                    response,
+                ],
+            ) as open_url,
+            patch("modules.link_resolver.time.sleep") as sleep,
+        ):
+            result = asyncio.run(
+                link_resolver.resolve_destination_url(
+                    "https://link-target.net/642509/pastelink-r43l1lbl4ck",
+                    "test-api-key",
+                )
+            )
+
+        self.assertEqual(result, "https://panelhenil-oss.github.io/UPD/")
+        self.assertEqual(open_url.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in open_url.call_args_list],
+            [60, 60],
+        )
+        sleep.assert_called_once_with(1)
+
     def test_rejects_unsupported_source_before_request(self):
         with patch("modules.link_resolver.urlopen") as open_url:
             with self.assertRaises(link_resolver.LinkResolverError):
