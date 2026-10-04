@@ -15,6 +15,21 @@ from modules import safe_forward
 
 
 class SafeForwardProgressTests(unittest.TestCase):
+    def test_mtproto_upload_keeps_group_destination(self):
+        original_username = safe_forward._BOT_USERNAME
+        try:
+            safe_forward.set_bot_username("test_bot")
+            self.assertEqual(
+                safe_forward._pyrogram_delivery_peer(-1001234567890),
+                -1001234567890,
+            )
+            self.assertEqual(
+                safe_forward._pyrogram_delivery_peer(12345),
+                "@test_bot",
+            )
+        finally:
+            safe_forward.set_bot_username(original_username)
+
     def test_album_strategy_keeps_small_photo_album_as_group(self):
         small_photo = SimpleNamespace(
             photo=SimpleNamespace(file_size=5 * 1024 * 1024),

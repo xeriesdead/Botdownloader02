@@ -87,6 +87,13 @@ def set_bot_username(username: str):
     _BOT_USERNAME = username
 
 
+def _pyrogram_delivery_peer(user_chat_id: int):
+    """Keep MTProto uploads in the command chat; private requests go to the bot DM."""
+    if user_chat_id < 0:
+        return user_chat_id
+    return f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+
+
 def _build_caption(original: str) -> str:
     """Tambahkan watermark bot ke caption asli."""
     tag = f"@{_BOT_USERNAME}" if _BOT_USERNAME else "Bot Downloader"
@@ -1837,7 +1844,7 @@ async def _pyrogram_copy_with_notice(client, bot, msg, user_chat_id: int, file_s
     Fallback untuk file besar (>50 MB) di channel private yang TIDAK restricted:
     Pyrogram meng-copy langsung ke chat bot user via MTProto (bypass batas 50 MB Bot API).
     """
-    bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+    bot_peer = _pyrogram_delivery_peer(user_chat_id)
     await _hard_timeout(
         msg.copy(bot_peer),
         timeout=_UPLOAD_TIMEOUT,
@@ -1895,7 +1902,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
         # Kirim ke chat bot (bukan Saved Messages).
         # Dari sudut pandang Pyrogram (login sebagai user), mengirim ke @bot_username
         # membuat file muncul langsung di chat antara user dan bot.
-        bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+        bot_peer = _pyrogram_delivery_peer(user_chat_id)
 
         ul_cb = _make_pyrogram_progress(on_progress, "Mengirim", file_size) if show_progress else None
         caption = _build_caption(msg.caption or "")
@@ -2023,7 +2030,7 @@ async def _send_album_item(
     """Kirim satu item album melalui jalur yang sesuai dengan ukuran file."""
     caption = _build_caption(msg.caption or "")
     file_size = _get_file_size(msg) or 0
-    bot_peer = f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
+    bot_peer = _pyrogram_delivery_peer(user_chat_id)
     upload_timeout = _media_transfer_timeout(file_size, _UPLOAD_TIMEOUT)
     # Thumbnail dibuat untuk video, tetapi kegagalannya tidak boleh membatalkan
     # jalur fallback pengiriman media.
