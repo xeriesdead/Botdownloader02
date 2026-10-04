@@ -30,6 +30,31 @@ class SafeForwardProgressTests(unittest.TestCase):
         finally:
             safe_forward.set_bot_username(original_username)
 
+    def test_album_upload_keeps_forum_topic_destination(self):
+        async def scenario():
+            class FakeBot:
+                async def send_media_group(self, chat_id, **kwargs):
+                    self.chat_id = chat_id
+                    self.kwargs = kwargs
+                    return ["sent"]
+
+            bot = FakeBot()
+            batch = [(None, None, object(), "photo")]
+            result = await safe_forward._send_media_group_with_watchdog(
+                bot,
+                -1001234567890,
+                batch,
+                on_progress=None,
+                timeout=1,
+                message_thread_id=77,
+            )
+            return bot, result
+
+        bot, result = asyncio.run(scenario())
+        self.assertEqual(result, ["sent"])
+        self.assertEqual(bot.chat_id, -1001234567890)
+        self.assertEqual(bot.kwargs["message_thread_id"], 77)
+
     def test_album_strategy_keeps_small_photo_album_as_group(self):
         small_photo = SimpleNamespace(
             photo=SimpleNamespace(file_size=5 * 1024 * 1024),

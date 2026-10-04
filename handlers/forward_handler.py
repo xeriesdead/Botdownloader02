@@ -793,7 +793,11 @@ def setup(app):
                                 and not (is_album and not single_only)
                             ):
                                 copied = await copy_public_message(
-                                    bot, chat_id, chat, msg_id, on_progress=_progress
+                                    bot, chat_id, chat, msg_id,
+                                    on_progress=_progress,
+                                    message_thread_id=getattr(
+                                        update.message, "message_thread_id", None
+                                    ),
                                 )
                                 if copied:
                                     activity_log(uid, "download", f"{chat}/{msg_id}")
@@ -859,6 +863,11 @@ def setup(app):
                                             or (is_album and not single_only)
                                         ),
                                         single_only=single_only,
+                                        message_thread_id=getattr(
+                                            update.message,
+                                            "message_thread_id",
+                                            None,
+                                        ),
                                     ),
                                     timeout=single_job_timeout,
                                     operation=f"forward message {msg_id}",
@@ -1259,12 +1268,18 @@ def setup(app):
                                     uc, bot, chat_id, chat_a, msg.id,
                                     on_progress=_progress,
                                     is_premium=is_prem,
+                                    message_thread_id=getattr(
+                                        update.message, "message_thread_id", None
+                                    ),
                                 )
                             else:
                                 ok, reason = await SafeForward.run(
                                     uc, bot, chat_id, chat_a, msg.id,
                                     on_progress=_progress,
                                     is_premium=is_prem,
+                                    message_thread_id=getattr(
+                                        update.message, "message_thread_id", None
+                                    ),
                                 )
 
                             if ok:
@@ -1468,6 +1483,7 @@ def setup(app):
             return
 
         retry_data = _retry_store.pop(uid, None)
+        message_thread_id = getattr(query.message, "message_thread_id", None)
         if not retry_data:
             await query.edit_message_reply_markup(reply_markup=None)
             await context.bot.send_message(
@@ -1510,6 +1526,7 @@ def setup(app):
             f"🔄 <b>Retry {n} pesan gagal... (0/{n})</b>\n\n"
             "<i>Ketik /canceldownload untuk membatalkan.</i>",
             parse_mode=ParseMode.HTML,
+            **({"message_thread_id": message_thread_id} if message_thread_id is not None else {}),
         )
         pmsg_id = pmsg.message_id
 
@@ -1627,7 +1644,15 @@ def setup(app):
                             _bulk_cancel[uid] = False
                             break
 
-                        ok, reason = await SafeForward.run(uc, context.bot, chat_id, channel, msg_id, is_premium=is_prem)
+                        ok, reason = await SafeForward.run(
+                            uc,
+                            context.bot,
+                            chat_id,
+                            channel,
+                            msg_id,
+                            is_premium=is_prem,
+                            message_thread_id=message_thread_id,
+                        )
                         if ok:
                             success += 1
                         else:

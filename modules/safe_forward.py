@@ -94,6 +94,15 @@ def _pyrogram_delivery_peer(user_chat_id: int):
     return f"@{_BOT_USERNAME}" if _BOT_USERNAME else user_chat_id
 
 
+def _thread_kwargs(message_thread_id: int | None) -> dict:
+    """Keep outgoing media in the Telegram forum topic where /get was issued."""
+    return (
+        {"message_thread_id": message_thread_id}
+        if message_thread_id is not None
+        else {}
+    )
+
+
 def _build_caption(original: str) -> str:
     """Tambahkan watermark bot ke caption asli."""
     tag = f"@{_BOT_USERNAME}" if _BOT_USERNAME else "Bot Downloader"
@@ -330,6 +339,7 @@ async def _send_media_group_with_watchdog(
     batch: list[tuple],
     on_progress,
     timeout: int,
+    message_thread_id: int | None = None,
 ):
     """
     Upload satu media group tanpa membiarkan status user diam selamanya.
@@ -345,6 +355,7 @@ async def _send_media_group_with_watchdog(
             write_timeout=_PTB_WRITE_TIMEOUT,
             read_timeout=_PTB_READ_TIMEOUT,
             connect_timeout=_PTB_CONNECT_TIMEOUT,
+            **_thread_kwargs(message_thread_id),
         )
     )
     started_at = time.monotonic()
@@ -546,6 +557,7 @@ async def _download_media(
 
 async def copy_public_message(
     bot, user_chat_id: int, chat, msg_id: int, on_progress=None,
+    message_thread_id: int | None = None,
 ) -> bool:
     """Pindahkan pesan publik lewat Bot API tanpa mengunduh media ke Railway."""
     if not isinstance(chat, str) or not chat.startswith("@"):
@@ -563,6 +575,7 @@ async def copy_public_message(
                 write_timeout=_PTB_WRITE_TIMEOUT,
                 read_timeout=_PTB_READ_TIMEOUT,
                 connect_timeout=_PTB_CONNECT_TIMEOUT,
+                **_thread_kwargs(message_thread_id),
             ),
             timeout=_BOT_COPY_TIMEOUT,
         )
@@ -597,6 +610,7 @@ async def copy_public_message(
                 write_timeout=_PTB_WRITE_TIMEOUT,
                 read_timeout=_PTB_READ_TIMEOUT,
                 connect_timeout=_PTB_CONNECT_TIMEOUT,
+                **_thread_kwargs(message_thread_id),
             ),
             timeout=_BOT_COPY_TIMEOUT,
         )
@@ -1311,7 +1325,8 @@ def _video_metadata(msg) -> dict:
 
 
 async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
-                                     on_progress=None):
+                                     on_progress=None,
+                                     message_thread_id: int | None = None):
     """
     Download media via Pyrogram, lalu kirim ke user via PTB bot.
     Menggunakan file object (bukan bytes) agar tidak OOM untuk file besar.
@@ -1327,6 +1342,7 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
     work_dir = _new_download_dir(user_chat_id)
     path = None
     thumbnail_path = None
+    thread_kwargs = _thread_kwargs(message_thread_id)
     try:
         try:
             path = await _download_media(
@@ -1360,7 +1376,10 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
         if msg.photo:
             with open(path, "rb") as f:
                 await asyncio.wait_for(
-                    bot.send_photo(user_chat_id, photo=f, caption=caption, **_kw),
+                    bot.send_photo(
+                        user_chat_id, photo=f, caption=caption,
+                        **_kw, **thread_kwargs,
+                    ),
                     timeout=_UPLOAD_TIMEOUT,
                 )
         elif msg.video:
@@ -1376,6 +1395,7 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                                 supports_streaming=True,
                                 **metadata,
                                 **_kw,
+                                **thread_kwargs,
                             ),
                             timeout=_UPLOAD_TIMEOUT,
                         )
@@ -1388,43 +1408,60 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                             supports_streaming=True,
                             **metadata,
                             **_kw,
+                            **thread_kwargs,
                         ),
                         timeout=_UPLOAD_TIMEOUT,
                     )
         elif msg.audio:
             with open(path, "rb") as f:
                 await asyncio.wait_for(
-                    bot.send_audio(user_chat_id, audio=f, caption=caption, **_kw),
+                    bot.send_audio(
+                        user_chat_id, audio=f, caption=caption,
+                        **_kw, **thread_kwargs,
+                    ),
                     timeout=_UPLOAD_TIMEOUT,
                 )
         elif msg.voice:
             with open(path, "rb") as f:
                 await asyncio.wait_for(
-                    bot.send_voice(user_chat_id, voice=f, caption=caption, **_kw),
+                    bot.send_voice(
+                        user_chat_id, voice=f, caption=caption,
+                        **_kw, **thread_kwargs,
+                    ),
                     timeout=_UPLOAD_TIMEOUT,
                 )
         elif msg.video_note:
             with open(path, "rb") as f:
                 await asyncio.wait_for(
-                    bot.send_video_note(user_chat_id, video_note=f, **_kw),
+                    bot.send_video_note(
+                        user_chat_id, video_note=f, **_kw, **thread_kwargs,
+                    ),
                     timeout=_UPLOAD_TIMEOUT,
                 )
         elif msg.animation:
             with open(path, "rb") as f:
                 await asyncio.wait_for(
-                    bot.send_animation(user_chat_id, animation=f, caption=caption, **_kw),
+                    bot.send_animation(
+                        user_chat_id, animation=f, caption=caption,
+                        **_kw, **thread_kwargs,
+                    ),
                     timeout=_UPLOAD_TIMEOUT,
                 )
         elif msg.sticker:
             with open(path, "rb") as f:
                 await asyncio.wait_for(
-                    bot.send_sticker(user_chat_id, sticker=f, **_kw),
+                    bot.send_sticker(
+                        user_chat_id, sticker=f, **_kw, **thread_kwargs,
+                    ),
                     timeout=_UPLOAD_TIMEOUT,
                 )
         else:
             with open(path, "rb") as f:
                 await asyncio.wait_for(
-                    bot.send_document(user_chat_id, document=f, caption=caption, **_kw),
+                    bot.send_document(
+                        user_chat_id, document=f, caption=caption,
+                        **_kw, **thread_kwargs,
+                    ),
                     timeout=_UPLOAD_TIMEOUT,
                 )
     except asyncio.TimeoutError as exc:
@@ -1498,7 +1535,8 @@ def _album_batches(items: list[tuple]) -> list[list[tuple]]:
 
 async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                               on_progress=None, is_premium: bool = False,
-                              messages=None):
+                              messages=None,
+                              message_thread_id: int | None = None):
     """
     Download seluruh album via Pyrogram, lalu kirim sebagai media group via PTB bot.
     File object tetap terbuka hingga send_media_group selesai, lalu ditutup & dihapus.
@@ -1710,6 +1748,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                         await _send_album_item(
                             client, bot, message, path, user_chat_id,
                             on_progress=on_progress,
+                            message_thread_id=message_thread_id,
                         )
                         item_sent = True
                         sent += 1
@@ -1779,6 +1818,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                     batch,
                     on_progress,
                     _album_timeout,
+                    message_thread_id=message_thread_id,
                 )
             except asyncio.CancelledError:
                 raise
@@ -1839,14 +1879,18 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 pass
 
 
-async def _pyrogram_copy_with_notice(client, bot, msg, user_chat_id: int, file_size: int):
+async def _pyrogram_copy_with_notice(
+    client, bot, msg, user_chat_id: int, file_size: int,
+    message_thread_id: int | None = None,
+):
     """
     Fallback untuk file besar (>50 MB) di channel private yang TIDAK restricted:
-    Pyrogram meng-copy langsung ke chat bot user via MTProto (bypass batas 50 MB Bot API).
+    Pyrogram meng-copy langsung ke tujuan /get via MTProto (bypass batas 50 MB Bot API).
     """
     bot_peer = _pyrogram_delivery_peer(user_chat_id)
+    thread_kwargs = _thread_kwargs(message_thread_id)
     await _hard_timeout(
-        msg.copy(bot_peer),
+        msg.copy(bot_peer, **thread_kwargs),
         timeout=_UPLOAD_TIMEOUT,
         operation=f"copy message {getattr(msg, 'id', '?')}",
     )
@@ -1854,10 +1898,11 @@ async def _pyrogram_copy_with_notice(client, bot, msg, user_chat_id: int, file_s
 
 async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                                             file_size: int, on_progress=None,
-                                            max_file_size: int | None = None):
+                                            max_file_size: int | None = None,
+                                            message_thread_id: int | None = None):
     """
     Untuk file besar (>50 MB) dari channel restricted:
-    Download file via Pyrogram lalu upload ulang langsung ke chat bot user via MTProto.
+    Download file via Pyrogram lalu upload ulang ke tujuan /get via MTProto.
     Bypass sekaligus: batas 50 MB Bot API + larangan forward/copy dari channel restricted.
     File Premium bisa sampai 2 GB (sesuai MAX_FILE_SIZE_BYTES_PREMIUM di config).
     on_progress: async callable(text: str) untuk update pesan status (opsional).
@@ -1899,10 +1944,10 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
             show_progress = on_progress and file_size >= _PROGRESS_MIN_BYTES
 
         await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
-        # Kirim ke chat bot (bukan Saved Messages).
-        # Dari sudut pandang Pyrogram (login sebagai user), mengirim ke @bot_username
-        # membuat file muncul langsung di chat antara user dan bot.
+        # Kirim ke chat tujuan yang menjalankan /get (bukan Saved Messages).
+        # Untuk pesan pribadi, peer bot mempertahankan perilaku DM yang lama.
         bot_peer = _pyrogram_delivery_peer(user_chat_id)
+        thread_kwargs = _thread_kwargs(message_thread_id)
 
         ul_cb = _make_pyrogram_progress(on_progress, "Mengirim", file_size) if show_progress else None
         caption = _build_caption(msg.caption or "")
@@ -1920,6 +1965,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     path,
                     caption=caption,
                     progress=transfer_progress,
+                    **thread_kwargs,
                 ),
                 timeout=upload_timeout,
                 operation="Pyrogram send_photo",
@@ -1935,6 +1981,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     thumb=thumbnail_path,
                     progress=transfer_progress,
                     **metadata,
+                    **thread_kwargs,
                 ),
                 timeout=upload_timeout,
                 operation="Pyrogram send_video",
@@ -1947,6 +1994,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     path,
                     caption=caption,
                     progress=transfer_progress,
+                    **thread_kwargs,
                 ),
                 timeout=upload_timeout,
                 operation="Pyrogram send_audio",
@@ -1959,6 +2007,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     path,
                     caption=caption,
                     progress=transfer_progress,
+                    **thread_kwargs,
                 ),
                 timeout=upload_timeout,
                 operation="Pyrogram send_voice",
@@ -1970,6 +2019,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     bot_peer,
                     path,
                     progress=transfer_progress,
+                    **thread_kwargs,
                 ),
                 timeout=upload_timeout,
                 operation="Pyrogram send_video_note",
@@ -1982,6 +2032,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     path,
                     caption=caption,
                     progress=transfer_progress,
+                    **thread_kwargs,
                 ),
                 timeout=upload_timeout,
                 operation="Pyrogram send_animation",
@@ -1993,6 +2044,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     bot_peer,
                     path,
                     progress=transfer_progress,
+                    **thread_kwargs,
                 ),
                 timeout=upload_timeout,
                 operation="Pyrogram send_sticker",
@@ -2005,6 +2057,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                     path,
                     caption=caption,
                     progress=transfer_progress,
+                    **thread_kwargs,
                 ),
                 timeout=upload_timeout,
                 operation="Pyrogram send_document",
@@ -2025,12 +2078,13 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
 
 async def _send_album_item(
     client, bot, msg, path: str, user_chat_id: int,
-    on_progress=None,
+    on_progress=None, message_thread_id: int | None = None,
 ) -> None:
     """Kirim satu item album melalui jalur yang sesuai dengan ukuran file."""
     caption = _build_caption(msg.caption or "")
     file_size = _get_file_size(msg) or 0
     bot_peer = _pyrogram_delivery_peer(user_chat_id)
+    thread_kwargs = _thread_kwargs(message_thread_id)
     upload_timeout = _media_transfer_timeout(file_size, _UPLOAD_TIMEOUT)
     # Thumbnail dibuat untuk video, tetapi kegagalannya tidak boleh membatalkan
     # jalur fallback pengiriman media.
@@ -2058,6 +2112,7 @@ async def _send_album_item(
                         path,
                         caption=caption,
                         progress=transfer_progress,
+                        **thread_kwargs,
                     ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_photo",
@@ -2073,6 +2128,7 @@ async def _send_album_item(
                         thumb=thumbnail_path,
                         progress=transfer_progress,
                         **metadata,
+                        **thread_kwargs,
                     ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_video",
@@ -2085,6 +2141,7 @@ async def _send_album_item(
                         path,
                         caption=caption,
                         progress=transfer_progress,
+                        **thread_kwargs,
                     ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_audio",
@@ -2097,6 +2154,7 @@ async def _send_album_item(
                         path,
                         caption=caption,
                         progress=transfer_progress,
+                        **thread_kwargs,
                     ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_voice",
@@ -2108,6 +2166,7 @@ async def _send_album_item(
                         bot_peer,
                         path,
                         progress=transfer_progress,
+                        **thread_kwargs,
                     ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_video_note",
@@ -2120,6 +2179,7 @@ async def _send_album_item(
                         path,
                         caption=caption,
                         progress=transfer_progress,
+                        **thread_kwargs,
                     ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_animation",
@@ -2132,6 +2192,7 @@ async def _send_album_item(
                         path,
                         caption=caption,
                         progress=transfer_progress,
+                        **thread_kwargs,
                     ),
                     timeout=upload_timeout,
                     operation="Pyrogram album send_document",
@@ -2142,7 +2203,10 @@ async def _send_album_item(
         with open(path, "rb") as f:
             if msg.photo:
                 await asyncio.wait_for(
-                    bot.send_photo(user_chat_id, photo=f, caption=caption, **_kw),
+                    bot.send_photo(
+                        user_chat_id, photo=f, caption=caption,
+                        **_kw, **thread_kwargs,
+                    ),
                     timeout=upload_timeout,
                 )
             elif msg.video:
@@ -2157,6 +2221,7 @@ async def _send_album_item(
                                 supports_streaming=True,
                                 **metadata,
                                 **_kw,
+                                **thread_kwargs,
                             ),
                             timeout=upload_timeout,
                         )
@@ -2169,27 +2234,40 @@ async def _send_album_item(
                             supports_streaming=True,
                             **metadata,
                             **_kw,
+                            **thread_kwargs,
                         ),
                         timeout=upload_timeout,
                     )
             elif msg.audio:
                 await asyncio.wait_for(
-                    bot.send_audio(user_chat_id, audio=f, caption=caption, **_kw),
+                    bot.send_audio(
+                        user_chat_id, audio=f, caption=caption,
+                        **_kw, **thread_kwargs,
+                    ),
                     timeout=upload_timeout,
                 )
             elif msg.voice:
                 await asyncio.wait_for(
-                    bot.send_voice(user_chat_id, voice=f, caption=caption, **_kw),
+                    bot.send_voice(
+                        user_chat_id, voice=f, caption=caption,
+                        **_kw, **thread_kwargs,
+                    ),
                     timeout=upload_timeout,
                 )
             elif msg.animation:
                 await asyncio.wait_for(
-                    bot.send_animation(user_chat_id, animation=f, caption=caption, **_kw),
+                    bot.send_animation(
+                        user_chat_id, animation=f, caption=caption,
+                        **_kw, **thread_kwargs,
+                    ),
                     timeout=upload_timeout,
                 )
             else:
                 await asyncio.wait_for(
-                    bot.send_document(user_chat_id, document=f, caption=caption, **_kw),
+                    bot.send_document(
+                        user_chat_id, document=f, caption=caption,
+                        **_kw, **thread_kwargs,
+                    ),
                     timeout=upload_timeout,
                 )
     finally:
@@ -2203,6 +2281,7 @@ async def _send_album_item(
 async def _send_album_streaming_individually(
     client, bot, messages, user_chat_id: int,
     on_progress=None, is_premium: bool = False,
+    message_thread_id: int | None = None,
 ) -> tuple[bool, str | None]:
     """
     Jalur hemat storage untuk album besar:
@@ -2310,6 +2389,7 @@ async def _send_album_streaming_individually(
                         path,
                         user_chat_id,
                         on_progress=on_progress,
+                        message_thread_id=message_thread_id,
                     )
                     item_sent = True
                     sent += 1
@@ -2349,6 +2429,7 @@ async def _send_album_streaming_individually(
 async def _send_album_individually(
     client, bot, chat, msg_id: int, user_chat_id: int,
     on_progress=None, is_premium: bool = False, messages=None,
+    message_thread_id: int | None = None,
 ) -> tuple[bool, str | None]:
     """
     Fallback album untuk kondisi ketika jalur group gagal.
@@ -2398,6 +2479,7 @@ async def _send_album_individually(
             user_chat_id,
             on_progress=on_progress,
             is_premium=is_premium,
+            message_thread_id=message_thread_id,
         )
 
     # Download semua file terlebih dahulu
@@ -2471,6 +2553,7 @@ async def _send_album_individually(
                 await _send_album_item(
                     client, bot, m, path, user_chat_id,
                     on_progress=on_progress,
+                    message_thread_id=message_thread_id,
                 )
                 item_sent = True
                 sent += 1
@@ -2596,6 +2679,7 @@ async def _fetch_album_messages(client, chat, msg_id: int, on_progress=None):
 
 async def _copy_public_album(
     bot, source_chat: str, messages, user_chat_id: int, on_progress=None,
+    message_thread_id: int | None = None,
 ) -> tuple[bool, str | None] | None:
     """
     Salin album publik langsung dari Telegram tanpa melewati Railway.
@@ -2625,6 +2709,7 @@ async def _copy_public_album(
                     write_timeout=_PTB_WRITE_TIMEOUT,
                     read_timeout=_PTB_READ_TIMEOUT,
                     connect_timeout=_PTB_CONNECT_TIMEOUT,
+                    **_thread_kwargs(message_thread_id),
                 ),
                 timeout=_BOT_COPY_TIMEOUT,
             )
@@ -2662,6 +2747,7 @@ async def _copy_public_album(
                     write_timeout=_PTB_WRITE_TIMEOUT,
                     read_timeout=_PTB_READ_TIMEOUT,
                     connect_timeout=_PTB_CONNECT_TIMEOUT,
+                    **_thread_kwargs(message_thread_id),
                 ),
                 timeout=_BOT_COPY_TIMEOUT,
             )
@@ -2697,6 +2783,7 @@ class SafeForward:
     async def run_album(
         client, bot, user_chat_id: int, chat, msg_id: int,
         on_progress=None, is_premium: bool = False,
+        message_thread_id: int | None = None,
     ) -> tuple[bool, str | None]:
         """
         Kirim seluruh album yang mengandung `msg_id` ke `user_chat_id`.
@@ -2805,6 +2892,7 @@ class SafeForward:
                         return await _send_album_streaming_individually(
                             client, bot, album_messages, user_chat_id,
                             on_progress=on_progress, is_premium=is_premium,
+                            message_thread_id=message_thread_id,
                         )
                     # Album kecil tetap dikirim sebagai media group setelah
                     # di-download agar tampilan album Telegram dipertahankan.
@@ -2812,6 +2900,7 @@ class SafeForward:
                         client, bot, source_chat, msg_id, user_chat_id,
                         on_progress=on_progress, is_premium=is_premium,
                         messages=album_messages,
+                        message_thread_id=message_thread_id,
                     )
 
                 # Album publik tidak perlu di-download ke Railway. Salin
@@ -2820,6 +2909,7 @@ class SafeForward:
                     copied_result = await _copy_public_album(
                         bot, chat, album_messages, user_chat_id,
                         on_progress=on_progress,
+                        message_thread_id=message_thread_id,
                     )
                     if copied_result is not None:
                         return copied_result
@@ -2833,12 +2923,14 @@ class SafeForward:
                     return await _send_album_streaming_individually(
                         client, bot, album_messages, user_chat_id,
                         on_progress=on_progress, is_premium=is_premium,
+                        message_thread_id=message_thread_id,
                     )
 
                 album_result = await _send_album_via_bot(
                     client, bot, source_chat, msg_id, user_chat_id,
                     on_progress=on_progress, is_premium=is_premium,
                     messages=album_messages,
+                    message_thread_id=message_thread_id,
                 )
                 if album_result is not None:
                     return album_result
@@ -2854,6 +2946,7 @@ class SafeForward:
                             f"⏳ <b>Telegram membatasi kecepatan sementara.</b>\n"
                             f"Menunggu <b>{wait} detik</b> lalu mencoba ulang...",
                             parse_mode="HTML",
+                            **_thread_kwargs(message_thread_id),
                         )
                     except Exception:
                         pass
@@ -2874,6 +2967,7 @@ class SafeForward:
                 return await _send_album_individually(
                     client, bot, source_chat, msg_id, user_chat_id,
                     on_progress=on_progress, is_premium=is_premium,
+                    message_thread_id=message_thread_id,
                 )
 
             except Exception as e:
@@ -2885,8 +2979,9 @@ class SafeForward:
                     # (JANGAN gunakan copy_media_group â akan gagal di channel restricted)
                     logger.info(f"Fallback kirim album satu per satu msg {msg_id}: {e}")
                     return await _send_album_individually(
-                    client, bot, source_chat, msg_id, user_chat_id,
+                        client, bot, source_chat, msg_id, user_chat_id,
                         on_progress=on_progress, is_premium=is_premium,
+                        message_thread_id=message_thread_id,
                     )
 
         return False, "Gagal setelah beberapa percobaan."
@@ -2898,6 +2993,7 @@ class SafeForward:
         is_premium: bool = False,
         skip_public_copy: bool = False,
         single_only: bool = False,
+        message_thread_id: int | None = None,
     ) -> tuple[bool, str | None]:
         """
         Ambil pesan dari `chat`/`msg_id` dan kirim ke `user_chat_id` via PTB bot.
@@ -2946,7 +3042,9 @@ class SafeForward:
                         )
                 if not is_album and (not has_media or largest_size is not None):
                     if await copy_public_message(
-                        bot, user_chat_id, chat, msg_id, on_progress=on_progress
+                        bot, user_chat_id, chat, msg_id,
+                        on_progress=on_progress,
+                        message_thread_id=message_thread_id,
                     ):
                         return True, None
             except Exception:
@@ -3001,6 +3099,7 @@ class SafeForward:
             return await SafeForward.run_album(
                 client, bot, user_chat_id, chat, msg_id,
                 on_progress=on_progress, is_premium=is_premium,
+                message_thread_id=message_thread_id,
             )
 
         # Single messages still use the protected-content check after fetch.
@@ -3050,6 +3149,7 @@ class SafeForward:
                         0,
                         on_progress=on_progress,
                         max_file_size=size_limit,
+                        message_thread_id=message_thread_id,
                     )
                     return True, None
 
@@ -3063,11 +3163,13 @@ class SafeForward:
                             await _download_and_upload_via_pyrogram(
                                 client, bot, msg, user_chat_id, file_size,
                                 on_progress=on_progress,
+                                message_thread_id=message_thread_id,
                             )
                         else:
                             await _download_and_send_via_bot(
                                 client, bot, msg, user_chat_id,
                                 on_progress=on_progress,
+                                message_thread_id=message_thread_id,
                             )
                         return True, None
                     else:
@@ -3079,6 +3181,7 @@ class SafeForward:
                                 chat_id=user_chat_id,
                                 from_chat_id=chat,
                                 message_id=msg_id,
+                                **_thread_kwargs(message_thread_id),
                             )
                             return True, None
                         except (BadRequest, Forbidden):
@@ -3087,7 +3190,8 @@ class SafeForward:
                                 # File >50 MB â tidak bisa di-re-upload via Bot API
                                 # Pyrogram copy langsung ke Saved Messages + notifikasi
                                 await _pyrogram_copy_with_notice(
-                                    client, bot, msg, user_chat_id, file_size
+                                    client, bot, msg, user_chat_id, file_size,
+                                    message_thread_id=message_thread_id,
                                 )
                                 return True, None
                             else:
@@ -3097,11 +3201,15 @@ class SafeForward:
                                 await _download_and_send_via_bot(
                                     client, bot, msg, user_chat_id,
                                     on_progress=on_progress,
+                                    message_thread_id=message_thread_id,
                                 )
                                 return True, None
                 else:
                     if msg.text:
-                        await bot.send_message(user_chat_id, msg.text)
+                        await bot.send_message(
+                            user_chat_id, msg.text,
+                            **_thread_kwargs(message_thread_id),
+                        )
                     else:
                         return False, f"Pesan `{msg_id}` tidak memiliki konten yang bisa dikirim."
                 return True, None
@@ -3119,6 +3227,7 @@ class SafeForward:
                             f"⏳ <b>Telegram membatasi kecepatan sementara.</b>\n"
                             f"Menunggu <b>{wait} detik</b> lalu mencoba ulang...",
                             parse_mode="HTML",
+                            **_thread_kwargs(message_thread_id),
                         )
                     except Exception:
                         pass
