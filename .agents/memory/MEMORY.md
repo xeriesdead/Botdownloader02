@@ -8,3 +8,4 @@
 - [Railway and GitHub workflow](railway-github-workflow.md) — keep this bot on Railway and push each agent-made change to GitHub.
 - [Link shortener destinations](link-shortener-destinations.md) — resolve supported shortlinks to any final destination domain, not only Rentry.
 - [Python dependency setup](python-dependency-setup.md) — avoid the standalone `telegram` package; verify Replit package installs did not duplicate requirements.
+- [Minimal-change scope](minimal-change-scope.md) — keep bot changes narrowly scoped and reuse existing flows; avoid unrelated restructuring.

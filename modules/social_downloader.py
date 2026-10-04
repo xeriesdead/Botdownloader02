@@ -13,6 +13,7 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 import yt_dlp
 
 from logger import logger
+from modules.terabox_api import TERABOX_DOMAINS
 
 # ── YouTube cookies helper ────────────────────────────────────────────────────
 # Jika env YOUTUBE_COOKIES diset (Netscape cookies.txt format), tulis ke file
@@ -79,7 +80,7 @@ SOCIAL_DOMAINS = {
     "t.co",
     "threads.net",
     "threads.com",
-}
+} | TERABOX_DOMAINS
 
 # Facebook: scraping langsung dari halaman HTML
 _FACEBOOK_DOMAINS = {"facebook.com", "fb.watch", "fb.com"}

@@ -21,6 +21,12 @@ from modules.social_downloader import (
     get_stream_urls,
     is_social_link,
 )
+from modules.terabox_api import (
+    MAX_TERABOX_BUTTON_ITEMS,
+    is_terabox_link,
+    resolve_terabox_files,
+    terabox_button_rows,
+)
 from modules.quota_service import QuotaService
 from modules.safe_forward import (
     SafeForward,
@@ -45,6 +51,8 @@ from config import (
     MAX_FILE_SIZE_MB_PREMIUM,
     MAX_JOB_SIZE_MB,
     MAX_JOB_SIZE_MB_PREMIUM,
+    TERABOX_API_KEY,
+    TERABOX_API_SECRET,
 )
 
 _user_last:   dict[int, float]        = {}
@@ -171,6 +179,7 @@ def setup(app):
         uid = update.effective_user.id
         chat_id = update.effective_chat.id
         bot = context.bot
+        is_terabox = is_terabox_link(url)
 
         if not QuotaService.use_quota(uid):
             return await update.message.reply_text(
@@ -185,10 +194,14 @@ def setup(app):
             QuotaService.add_quota(uid, 1)
             return await update.message.reply_text("❌ Server sedang sibuk, coba lagi nanti.")
 
-        pmsg = await update.message.reply_text(
-            "🔍 Mengambil media sosial...\n"
+        status_text = (
+            "🔍 Menghubungi layanan TeraBox...\n"
+            "⏳ Pastikan tautan dapat diakses publik."
+            if is_terabox
+            else "🔍 Mengambil media sosial...\n"
             "⏳ Link publik saja — tidak perlu login akun sosial."
         )
+        pmsg = await update.message.reply_text(status_text)
 
         async def edit(text: str):
             try:
@@ -223,7 +236,69 @@ def setup(app):
                 async with _get_lock_with_timeout(uid):
                     _bulk_cancel[uid] = False
                     logger.info("[social] user lock acquired uid=%s; starting extraction", uid)
-                    await edit("🔍 Menganalisis link media sosial...")
+                    await edit(
+                        "🔍 Menghubungi API TeraBox..."
+                        if is_terabox
+                        else "🔍 Menganalisis link media sosial..."
+                    )
+                    if is_terabox:
+                        title, files = await asyncio.to_thread(
+                            resolve_terabox_files,
+                            url,
+                            TERABOX_API_KEY,
+                            TERABOX_API_SECRET,
+                        )
+                        if _bulk_cancel.get(uid):
+                            refund_quota()
+                            _bulk_cancel[uid] = False
+                            await edit("🛑 Proses TeraBox dibatalkan.")
+                            return
+
+                        visible_files = files[:MAX_TERABOX_BUTTON_ITEMS]
+                        lines = [
+                            "✅ <b>Tautan TeraBox siap dibuka.</b>",
+                            "Pilih tombol untuk streaming atau download melalui browser:",
+                        ]
+                        for index, item in enumerate(visible_files, 1):
+                            filename = escape(item.filename[:100])
+                            size = (
+                                f" · {_fmt_size(item.size_bytes)}"
+                                if item.size_bytes is not None
+                                else ""
+                            )
+                            lines.append(f"<b>{index}.</b> {filename}{size}")
+                        if len(files) > MAX_TERABOX_BUTTON_ITEMS:
+                            lines.append(
+                                f"⚠️ Menampilkan {MAX_TERABOX_BUTTON_ITEMS} file pertama "
+                                "dari hasil API."
+                            )
+
+                        keyboard = InlineKeyboardMarkup([
+                            [
+                                InlineKeyboardButton(text=label, url=target_url)
+                                for label, target_url in row
+                            ]
+                            for row in terabox_button_rows(visible_files)
+                        ])
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="\n".join(lines),
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                            reply_markup=keyboard,
+                        )
+                        activity_log(uid, "terabox_links", title[:180])
+                        quota = QuotaService.get_quota(uid)
+                        quota_display = (
+                            "∞ Unlimited" if quota.get("unlimited") else str(quota["total"])
+                        )
+                        await edit(
+                            "✅ <b>Tombol streaming dan download siap!</b>\n"
+                            f"📦 Sisa quota: <b>{quota_display}</b>"
+                        )
+                        await _quota_warn(bot, chat_id, uid)
+                        return
+
                     title, files, work_dir = await download_public_media(url, uid)
 
                     if _bulk_cancel.get(uid):
@@ -425,7 +500,8 @@ def setup(app):
                 if err_str.startswith("❌"):
                     await edit(err_str)
                 else:
-                    await edit(f"❌ Gagal mendownload media sosial:\n{err_str}")
+                    source_name = "TeraBox" if is_terabox else "media sosial"
+                    await edit(f"❌ Gagal memproses {source_name}:\n{err_str}")
             finally:
                 if work_dir:
                     cleanup_download(work_dir)

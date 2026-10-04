@@ -83,3 +83,8 @@ LINK_RESOLVER_API_KEY: str | None = os.getenv("LINK_RESOLVER_API_KEY") or None
 # ke Railway variable INSTAGRAM_COOKIES.
 # Tanpa ini, download Instagram Reel yang memerlukan auth akan gagal.
 INSTAGRAM_COOKIES: str | None = os.getenv("INSTAGRAM_COOKIES") or None
+
+# Kredensial AR Digital untuk tombol streaming dan download TeraBox.
+# Simpan sebagai Railway Variables; jangan kirim kredensial melalui chat.
+TERABOX_API_KEY: str | None = os.getenv("TERABOX_API_KEY") or None
+TERABOX_API_SECRET: str | None = os.getenv("TERABOX_API_SECRET") or None
