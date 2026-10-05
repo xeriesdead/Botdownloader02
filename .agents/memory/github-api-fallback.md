@@ -14,3 +14,7 @@ When the configured HTTPS Git remote rejects authentication, an added standard G
 **Why:** A Git blob POST with UTF-8 content returned a Cloudflare 403 through the connector proxy, while Base64 encoding of the same content succeeded.
 
 **How to apply:** Send Git blob contents as Base64 with `encoding: "base64"` and verify each returned blob SHA against the local object before creating the tree.
+
+**Why:** Large `shellExec` outputs inside CodeExecution were clipped even when the callback reported no truncation, and chunked Base64 output carried line endings.
+
+**How to apply:** For large blobs, gzip before Base64 transfer and gunzip inside the impure connector call; if chunking is needed, trim each chunk and verify the expected blob SHA before publishing.
