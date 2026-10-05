@@ -42,14 +42,24 @@ class LinkResolverTests(unittest.TestCase):
             "https://linkvertise.com/642509/SH7kRb7idos3",
         )
 
-    def test_resolves_linkvertise_access_path_using_documented_bare_format(self):
+    def test_access_path_uses_full_url_then_bare_format_after_http_422(self):
         response = _FakeResponse({
             "data": {
                 "url": "https://panelhenil-oss.github.io/UPD/",
                 "inputUrl": "https://linkvertise.com/access/1239053/engobhM4ZGTH",
             },
         })
-        with patch("modules.link_resolver.urlopen", return_value=response) as open_url:
+        rejected_full_url = HTTPError(
+            "https://api.zapi.ink",
+            422,
+            "Unprocessable Entity",
+            {},
+            None,
+        )
+        with patch(
+            "modules.link_resolver.urlopen",
+            side_effect=[rejected_full_url, response],
+        ) as open_url:
             result = asyncio.run(
                 link_resolver.resolve_destination_url(
                     "https://linkvertise.com/access/1239053/engobhM4ZGTH",
@@ -58,10 +68,31 @@ class LinkResolverTests(unittest.TestCase):
             )
 
         self.assertEqual(result, "https://panelhenil-oss.github.io/UPD/")
+        self.assertEqual(
+            [
+                parse_qs(urlsplit(call.args[0].full_url).query)["url"][0]
+                for call in open_url.call_args_list
+            ],
+            [
+                "https://linkvertise.com/access/1239053/engobhM4ZGTH",
+                "1239053/engobhM4ZGTH",
+            ],
+        )
+
+    def test_access_path_succeeds_with_full_url_without_fallback(self):
+        source_url = "https://linkvertise.com/access/9393697/kVMNnaBjbf9r"
+        response = _FakeResponse({"url": "https://example.com/download"})
+        with patch("modules.link_resolver.urlopen", return_value=response) as open_url:
+            result = asyncio.run(
+                link_resolver.resolve_destination_url(source_url, "test-api-key")
+            )
+
+        self.assertEqual(result, "https://example.com/download")
+        self.assertEqual(open_url.call_count, 1)
         request = open_url.call_args.args[0]
         self.assertEqual(
             parse_qs(urlsplit(request.full_url).query)["url"],
-            ["1239053/engobhM4ZGTH"],
+            [source_url],
         )
 
     def test_normalizes_www_linkvertise_access_host(self):

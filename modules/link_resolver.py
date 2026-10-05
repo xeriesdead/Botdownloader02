@@ -192,30 +192,45 @@ def _resolver_input_url(source_url: str) -> str:
 
 
 def _request_destination(source_url: str, api_key: str) -> str:
-    request_url = f"{_API_URL}?{urlencode({'url': _resolver_input_url(source_url)})}"
-    request = Request(
-        request_url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "BotDownloader/1.0",
-            "x-api-key": api_key,
-        },
-    )
+    normalized_url = _resolver_input_url(source_url)
+    input_urls = [source_url]
+    if normalized_url != source_url:
+        # The full /access/... URL is needed by some newer Linkvertise links.
+        # Keep the documented bare userId/slug representation as a 422 fallback.
+        input_urls.append(normalized_url)
 
-    for attempt in range(_TIMEOUT_RETRIES + 1):
-        try:
-            with urlopen(request, timeout=_REQUEST_TIMEOUT) as response:
-                body = response.read(_MAX_RESPONSE_BYTES + 1)
+    body = None
+    for input_index, input_url in enumerate(input_urls):
+        request_url = f"{_API_URL}?{urlencode({'url': input_url})}"
+        request = Request(
+            request_url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "BotDownloader/1.0",
+                "x-api-key": api_key,
+            },
+        )
+
+        for attempt in range(_TIMEOUT_RETRIES + 1):
+            try:
+                with urlopen(request, timeout=_REQUEST_TIMEOUT) as response:
+                    body = response.read(_MAX_RESPONSE_BYTES + 1)
+                break
+            except HTTPError as exc:
+                if exc.code == 422 and input_index + 1 < len(input_urls):
+                    exc.close()
+                    break
+                raise LinkResolverError(
+                    f"Resolver API returned HTTP {exc.code}"
+                ) from exc
+            except (URLError, TimeoutError, OSError) as exc:
+                if _is_timeout_error(exc) and attempt < _TIMEOUT_RETRIES:
+                    time.sleep(_TIMEOUT_RETRY_DELAY)
+                    continue
+                raise LinkResolverError(_network_error_message(exc)) from exc
+
+        if body is not None:
             break
-        except HTTPError as exc:
-            raise LinkResolverError(
-                f"Resolver API returned HTTP {exc.code}"
-            ) from exc
-        except (URLError, TimeoutError, OSError) as exc:
-            if _is_timeout_error(exc) and attempt < _TIMEOUT_RETRIES:
-                time.sleep(_TIMEOUT_RETRY_DELAY)
-                continue
-            raise LinkResolverError(_network_error_message(exc)) from exc
 
     if len(body) > _MAX_RESPONSE_BYTES:
         raise LinkResolverError("Resolver API response was too large")
