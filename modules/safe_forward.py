@@ -1107,8 +1107,8 @@ def _album_download_target(msg, user_chat_id: int, album_msg_id: int,
     """Buat nama file unik agar item album tidak saling menimpa."""
     if msg.photo:
         extension = ".jpg"
-    elif msg.video or msg.animation or msg.video_note:
-        extension = ".mp4"
+    elif _is_video_message(msg) or msg.animation or msg.video_note:
+        extension = _video_document_extension(msg) or ".mp4"
     elif msg.audio:
         extension = ".mp3"
     elif msg.voice:
@@ -1124,6 +1124,129 @@ def _album_download_target(msg, user_chat_id: int, album_msg_id: int,
         "downloads",
         f"album_{user_chat_id}_{album_msg_id}_{item_index}_{msg.id}{extension}",
     )
+
+
+_VIDEO_DOCUMENT_EXTENSIONS = {".mp4", ".m4v"}
+_VIDEO_DOCUMENT_MIME_EXTENSIONS = {
+    "video/mp4": ".mp4",
+    "video/x-m4v": ".m4v",
+}
+
+
+def _video_document_extension(message) -> str | None:
+    """Return an inline-video extension when a document is MP4-compatible."""
+    document = getattr(message, "document", None)
+    if not document:
+        return None
+
+    file_name = getattr(document, "file_name", None) or ""
+    extension = os.path.splitext(os.path.basename(file_name))[1].lower()
+    if extension in _VIDEO_DOCUMENT_EXTENSIONS:
+        return extension
+
+    mime_type = (
+        (getattr(document, "mime_type", None) or "")
+        .split(";", 1)[0]
+        .strip()
+        .lower()
+    )
+    return _VIDEO_DOCUMENT_MIME_EXTENSIONS.get(mime_type)
+
+
+def _is_video_message(message, path: str | None = None) -> bool:
+    """Recognize Telegram video messages and MP4 documents."""
+    if getattr(message, "video", None) or _video_document_extension(message):
+        return True
+    return bool(
+        getattr(message, "document", None)
+        and path
+        and os.path.splitext(path)[1].lower() in _VIDEO_DOCUMENT_EXTENSIONS
+    )
+
+
+def _media_download_target(message, work_dir: str) -> str:
+    """Give video documents a real media extension instead of Pyrogram's .temp."""
+    extension = _video_document_extension(message)
+    if not extension:
+        return work_dir
+
+    document = getattr(message, "document", None)
+    file_name = getattr(document, "file_name", None) or ""
+    file_name = os.path.basename(file_name.replace("\\", "/"))
+    if os.path.splitext(file_name)[1].lower() != extension:
+        file_name = f"video_{getattr(message, 'id', 'media')}{extension}"
+    return os.path.join(work_dir, file_name)
+
+
+def _should_probe_video_document(message) -> bool:
+    """Probe only documents whose missing/generic filename hides their format."""
+    document = getattr(message, "document", None)
+    if not document or _video_document_extension(message):
+        return False
+
+    file_name = getattr(document, "file_name", None) or ""
+    extension = os.path.splitext(os.path.basename(file_name))[1].lower()
+    mime_type = (
+        (getattr(document, "mime_type", None) or "")
+        .split(";", 1)[0]
+        .strip()
+        .lower()
+    )
+    return extension in {"", ".bin", ".temp"} and not mime_type.startswith("video/")
+
+
+def _is_mp4_video_file(path: str) -> bool:
+    """Detect an MP4-family video when Telegram omitted document metadata."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_type:format=format_name",
+                "-of", "default=noprint_wrappers=1",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+
+        fields = dict(
+            line.split("=", 1)
+            for line in result.stdout.splitlines()
+            if "=" in line
+        )
+        formats = set(fields.get("format_name", "").split(","))
+        return (
+            fields.get("codec_type") == "video"
+            and bool(formats & {"mp4", "mov", "3gp", "3g2", "mj2"})
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+async def _classify_video_download(message, path: str) -> tuple[str, bool]:
+    """Detect video documents after download and normalize their upload name."""
+    is_video = _is_video_message(message, path)
+    if not is_video and _should_probe_video_document(message):
+        is_video = await asyncio.to_thread(_is_mp4_video_file, path)
+
+    if not is_video or not getattr(message, "document", None):
+        return path, is_video
+
+    extension = _video_document_extension(message) or ".mp4"
+    if os.path.splitext(path)[1].lower() != extension:
+        target = os.path.join(
+            os.path.dirname(path),
+            f"video_{getattr(message, 'id', 'media')}{extension}",
+        )
+        os.replace(path, target)
+        path = target
+    return path, True
 
 
 def _fmt_size(size_bytes: int) -> str:
@@ -1348,7 +1471,7 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
             path = await _download_media(
                 client,
                 msg,
-                file_name=work_dir,
+                file_name=_media_download_target(msg, work_dir),
                 timeout=_DOWNLOAD_TIMEOUT,
                 operation=f"download message {getattr(msg, 'id', '?')}",
                 progress=dl_cb,
@@ -1359,13 +1482,14 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
+        path, is_video = await _classify_video_download(msg, path)
         await _notify_progress(on_progress, "📤 <b>Mengirim media...</b>")
         caption = _build_caption(msg.caption or "")
         # Buat thumbnail dari frame video setelah download selesai. Jika FFmpeg
         # gagal, upload tetap dilanjutkan tanpa thumbnail.
         thumbnail_path = (
             await _create_video_thumbnail_async(path)
-            if msg.video else None
+            if is_video else None
         )
         metadata = _video_metadata(msg)
         _kw = dict(
@@ -1382,7 +1506,7 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
                     ),
                     timeout=_UPLOAD_TIMEOUT,
                 )
-        elif msg.video:
+        elif is_video:
             with open(path, "rb") as f:
                 if thumbnail_path:
                     with open(thumbnail_path, "rb") as thumb:
@@ -1477,9 +1601,11 @@ async def _download_and_send_via_bot(client, bot, msg, user_chat_id: int,
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def _album_media_kind(message) -> str | None:
+def _album_media_kind(message, is_video: bool | None = None) -> str | None:
     """Return the Bot API media-group type supported for this message."""
-    if getattr(message, "photo", None) or getattr(message, "video", None):
+    if getattr(message, "photo", None) or (
+        _is_video_message(message) if is_video is None else is_video
+    ):
         return "visual"
     if getattr(message, "audio", None):
         return "audio"
@@ -1649,6 +1775,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 logger.error("%s msg %s", reason, m.id)
                 shutil.rmtree(item_dir, ignore_errors=True)
                 return False, reason
+            path, is_video = await _classify_video_download(m, path)
             paths.append(path)
             download_dirs.append(item_dir)
 
@@ -1669,7 +1796,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
 
             if m.photo:
                 media_item = InputMediaPhoto(media=f, caption=caption)
-            elif m.video:
+            elif is_video:
                 logger.info(
                     "[album] thumbnail start index=%s/%s msg=%s path=%s",
                     i + 1,
@@ -1717,7 +1844,7 @@ async def _send_album_via_bot(client, bot, chat, msg_id: int, user_chat_id: int,
                 media_item = InputMediaDocument(media=f, caption=caption)
 
             downloaded_items.append(
-                (m, path, media_item, _album_media_kind(m))
+                (m, path, media_item, _album_media_kind(m, is_video))
             )
             logger.info(
                 "[album] item prepared index=%s/%s msg=%s kind=%s",
@@ -1921,7 +2048,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
             path = await _download_media(
                 client,
                 msg,
-                file_name=work_dir,
+                file_name=_media_download_target(msg, work_dir),
                 timeout=transfer_timeout,
                 operation=f"download message {getattr(msg, 'id', '?')}",
                 progress=dl_cb,
@@ -1933,6 +2060,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
         if not path:
             raise RuntimeError("Download gagal, file tidak tersedia.")
 
+        path, is_video = await _classify_video_download(msg, path)
         if max_file_size is not None:
             actual_size = os.path.getsize(path)
             if actual_size > max_file_size:
@@ -1955,7 +2083,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
         # Jika gagal, upload utama tetap diteruskan tanpa thumbnail.
         thumbnail_path = (
             await _create_video_thumbnail_async(path)
-            if msg.video else None
+            if is_video else None
         )
         metadata = _video_metadata(msg)
         if msg.photo:
@@ -1971,7 +2099,7 @@ async def _download_and_upload_via_pyrogram(client, bot, msg, user_chat_id: int,
                 operation="Pyrogram send_photo",
                 progress=ul_cb,
             )
-        elif msg.video:
+        elif is_video:
             await _run_transfer_with_watchdog(
                 lambda transfer_progress: client.send_video(
                     bot_peer,
@@ -2086,11 +2214,12 @@ async def _send_album_item(
     bot_peer = _pyrogram_delivery_peer(user_chat_id)
     thread_kwargs = _thread_kwargs(message_thread_id)
     upload_timeout = _media_transfer_timeout(file_size, _UPLOAD_TIMEOUT)
+    path, is_video = await _classify_video_download(msg, path)
     # Thumbnail dibuat untuk video, tetapi kegagalannya tidak boleh membatalkan
     # jalur fallback pengiriman media.
     thumbnail_path = (
         await _safe_create_video_thumbnail_async(path)
-        if msg.video else None
+        if is_video else None
     )
     metadata = _video_metadata(msg)
     _kw = dict(
@@ -2118,7 +2247,7 @@ async def _send_album_item(
                     operation="Pyrogram album send_photo",
                     progress=upload_progress,
                 )
-            elif msg.video:
+            elif is_video:
                 await _run_transfer_with_watchdog(
                     lambda transfer_progress: client.send_video(
                         bot_peer,
@@ -2209,7 +2338,7 @@ async def _send_album_item(
                     ),
                     timeout=upload_timeout,
                 )
-            elif msg.video:
+            elif is_video:
                 if thumbnail_path:
                     with open(thumbnail_path, "rb") as thumb:
                         await asyncio.wait_for(

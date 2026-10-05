@@ -1,8 +1,10 @@
 import asyncio
 import os
+import tempfile
 import time
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 # safe_forward imports the application configuration at module import time.
@@ -15,6 +17,138 @@ from modules import safe_forward
 
 
 class SafeForwardProgressTests(unittest.TestCase):
+    def test_video_document_is_classified_and_named_as_mp4(self):
+        message = SimpleNamespace(
+            id=42,
+            photo=None,
+            video=None,
+            animation=None,
+            video_note=None,
+            audio=None,
+            voice=None,
+            sticker=None,
+            document=SimpleNamespace(
+                file_name=None,
+                mime_type="video/mp4",
+                file_size=1024,
+            ),
+        )
+
+        self.assertTrue(safe_forward._is_video_message(message))
+        self.assertEqual(safe_forward._album_media_kind(message), "visual")
+        self.assertTrue(
+            safe_forward._album_download_target(message, 1, 2, 3).endswith(".mp4")
+        )
+
+        document_message = SimpleNamespace(
+            id=43,
+            photo=None,
+            video=None,
+            animation=None,
+            video_note=None,
+            audio=None,
+            voice=None,
+            sticker=None,
+            document=SimpleNamespace(
+                file_name="notes.pdf",
+                mime_type="application/pdf",
+            ),
+        )
+        self.assertFalse(safe_forward._is_video_message(document_message))
+        self.assertEqual(
+            safe_forward._album_media_kind(document_message),
+            "document",
+        )
+
+    def test_video_document_upload_uses_video_endpoint_and_mp4_name(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                work_dir = os.path.join(temp_dir, "job")
+                os.makedirs(work_dir)
+
+                class FakeBot:
+                    kind = None
+                    filename = None
+
+                    async def send_video(self, _chat_id, **kwargs):
+                        self.kind = "video"
+                        self.filename = kwargs["video"].name
+
+                    async def send_document(self, _chat_id, **kwargs):
+                        self.kind = "document"
+                        self.filename = kwargs["document"].name
+
+                async def fake_download(_client, _message, file_name, **_kwargs):
+                    with open(file_name, "wb") as media:
+                        media.write(b"video bytes")
+                    return file_name
+
+                message = SimpleNamespace(
+                    id=42,
+                    photo=None,
+                    video=None,
+                    audio=None,
+                    voice=None,
+                    video_note=None,
+                    animation=None,
+                    sticker=None,
+                    document=SimpleNamespace(
+                        file_name=None,
+                        mime_type="video/mp4",
+                        file_size=11,
+                    ),
+                    caption="",
+                )
+                bot = FakeBot()
+                with (
+                    patch.object(
+                        safe_forward, "_new_download_dir", return_value=work_dir
+                    ),
+                    patch.object(
+                        safe_forward, "_download_media", side_effect=fake_download
+                    ),
+                    patch.object(
+                        safe_forward,
+                        "_create_video_thumbnail_async",
+                        return_value=None,
+                    ),
+                ):
+                    await safe_forward._download_and_send_via_bot(
+                        object(), bot, message, 12345
+                    )
+                return bot.kind, bot.filename
+
+        kind, filename = asyncio.run(scenario())
+        self.assertEqual(kind, "video")
+        self.assertTrue(filename.endswith(".mp4"))
+
+    def test_unknown_temp_document_is_probed_and_renamed(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = os.path.join(temp_dir, "telegram_download.temp")
+                with open(path, "wb") as media:
+                    media.write(b"video bytes")
+                message = SimpleNamespace(
+                    id=42,
+                    video=None,
+                    document=SimpleNamespace(
+                        file_name=None,
+                        mime_type="application/octet-stream",
+                    ),
+                )
+                with patch.object(
+                    safe_forward, "_is_mp4_video_file", return_value=True
+                ):
+                    normalized_path, is_video = (
+                        await safe_forward._classify_video_download(message, path)
+                    )
+                    self.assertTrue(is_video)
+                    self.assertTrue(normalized_path.endswith(".mp4"))
+                    self.assertTrue(os.path.isfile(normalized_path))
+                    return os.path.basename(normalized_path)
+
+        self.assertEqual(asyncio.run(scenario()), "video_42.mp4")
+
     def test_mtproto_upload_keeps_group_destination(self):
         original_username = safe_forward._BOT_USERNAME
         try:
