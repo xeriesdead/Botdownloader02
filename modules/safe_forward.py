@@ -666,13 +666,23 @@ async def check_channel_access(client, chat) -> tuple[bool, str]:
         return True, ""
 
 
-async def _is_forwards_restricted(client, chat) -> bool:
+async def _is_forwards_restricted(client, chat, messages=None) -> bool:
     """
     Cek apakah channel/grup mengaktifkan 'Restrict Saving Content' (noforwards).
-    Hasil di-cache per chat agar efisien saat bulk download.
+    Flag pesan yang sudah diambil diprioritaskan; status chat menjadi fallback.
+    Hasil true di-cache per chat agar efisien saat bulk download.
     Return True jika forward dibatasi, False jika tidak (atau tidak bisa cek).
     """
     cache_key = str(chat)
+    if messages is not None:
+        if not isinstance(messages, (list, tuple)):
+            messages = (messages,)
+        if any(
+            bool(getattr(message, "has_protected_content", False))
+            for message in messages
+        ):
+            _forwards_restricted_cache[cache_key] = True
+            return True
     if cache_key in _forwards_restricted_cache:
         return _forwards_restricted_cache[cache_key]
     try:
@@ -3007,9 +3017,8 @@ class SafeForward:
                         f"{job_label}."
                     )
 
-                is_restricted = any(
-                    bool(getattr(message, "has_protected_content", False))
-                    for message in album_messages
+                is_restricted = await _is_forwards_restricted(
+                    client, source_chat, album_messages
                 )
                 if is_restricted:
                     if _should_stream_album(album_messages):
@@ -3233,7 +3242,9 @@ class SafeForward:
 
         # Single messages still use the protected-content check after fetch.
         await _notify_progress(on_progress, "🔎 <b>Memeriksa akses media...</b>")
-        is_restricted = await _is_forwards_restricted(client, source_chat)
+        is_restricted = await _is_forwards_restricted(
+            client, source_chat, msg
+        )
         # ââ Langkah 3: Cek ukuran file terhadap hard limit âââââââââââââââ
         file_size  = _get_file_size(msg)
         size_limit = MAX_FILE_SIZE_BYTES_PREMIUM if is_premium else MAX_FILE_SIZE_BYTES
@@ -3318,10 +3329,28 @@ class SafeForward:
                             if is_large:
                                 # File >50 MB â tidak bisa di-re-upload via Bot API
                                 # Pyrogram copy langsung ke Saved Messages + notifikasi
-                                await _pyrogram_copy_with_notice(
-                                    client, bot, msg, user_chat_id, file_size,
-                                    message_thread_id=message_thread_id,
-                                )
+                                try:
+                                    await _pyrogram_copy_with_notice(
+                                        client, bot, msg, user_chat_id, file_size,
+                                        message_thread_id=message_thread_id,
+                                    )
+                                except ChatForwardsRestricted:
+                                    # Cache the protection signal from Telegram,
+                                    # then retry as a new upload instead of copy.
+                                    _forwards_restricted_cache[
+                                        str(source_chat)
+                                    ] = True
+                                    logger.info(
+                                        "ChatForwardsRestricted saat copy "
+                                        "pesan %s; beralih ke download+upload",
+                                        msg_id,
+                                    )
+                                    await _download_and_upload_via_pyrogram(
+                                        client, bot, msg, user_chat_id,
+                                        file_size,
+                                        on_progress=on_progress,
+                                        message_thread_id=message_thread_id,
+                                    )
                                 return True, None
                             else:
                                 # File kecil tetap di-upload oleh bot setelah

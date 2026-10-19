@@ -15,6 +15,170 @@ from modules.link_parser import is_single_message_link, parse_telegram_link
 
 
 class SafeForwardSizeGuardTests(unittest.TestCase):
+    def test_message_protection_overrides_cached_unrestricted_status(self):
+        chat = -1001234567890
+        cache_key = str(chat)
+        previous = safe_forward._forwards_restricted_cache.get(cache_key)
+        had_previous = cache_key in safe_forward._forwards_restricted_cache
+        safe_forward._forwards_restricted_cache[cache_key] = False
+        client = SimpleNamespace(get_chat=AsyncMock())
+
+        try:
+            restricted = asyncio.run(
+                safe_forward._is_forwards_restricted(
+                    client,
+                    chat,
+                    SimpleNamespace(has_protected_content=True),
+                )
+            )
+            self.assertTrue(restricted)
+            self.assertTrue(
+                safe_forward._forwards_restricted_cache[cache_key]
+            )
+            client.get_chat.assert_not_awaited()
+        finally:
+            if had_previous:
+                safe_forward._forwards_restricted_cache[cache_key] = previous
+            else:
+                safe_forward._forwards_restricted_cache.pop(cache_key, None)
+
+    def test_album_uses_chat_protection_when_message_flag_is_false(self):
+        source_chat = 12345
+        cache_key = str(source_chat)
+        previous = safe_forward._forwards_restricted_cache.get(cache_key)
+        had_previous = cache_key in safe_forward._forwards_restricted_cache
+        safe_forward._forwards_restricted_cache.pop(cache_key, None)
+        message = SimpleNamespace(
+            id=1,
+            empty=False,
+            media_group_id="album-1",
+            media=object(),
+            video=SimpleNamespace(file_size=1024),
+            has_protected_content=False,
+        )
+        client = SimpleNamespace(
+            get_chat=AsyncMock(
+                return_value=SimpleNamespace(has_protected_content=True)
+            )
+        )
+
+        async def scenario():
+            with (
+                patch.object(
+                    safe_forward,
+                    "_resolve_source",
+                    new=AsyncMock(return_value=(source_chat, None)),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_fetch_album_messages",
+                    new=AsyncMock(return_value=[message]),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_send_album_via_bot",
+                    new=AsyncMock(return_value=(True, None)),
+                ) as send_via_bot,
+            ):
+                result = await safe_forward.SafeForward.run_album(
+                    client, object(), 456, -10012345, 1
+                )
+                return result, send_via_bot
+
+        try:
+            result, send_via_bot = asyncio.run(scenario())
+            self.assertEqual(result, (True, None))
+            client.get_chat.assert_awaited_once_with(source_chat)
+            send_via_bot.assert_awaited_once()
+        finally:
+            if had_previous:
+                safe_forward._forwards_restricted_cache[cache_key] = previous
+            else:
+                safe_forward._forwards_restricted_cache.pop(cache_key, None)
+
+    def test_pyrogram_restricted_copy_falls_back_to_fresh_upload(self):
+        class FakeChatForwardsRestricted(Exception):
+            pass
+
+        class FakeBot:
+            async def copy_message(self, **_kwargs):
+                raise safe_forward.BadRequest("private source")
+
+        message = SimpleNamespace(
+            id=7,
+            empty=False,
+            media_group_id=None,
+            media=object(),
+            video=SimpleNamespace(file_size=10),
+            photo=None,
+            document=None,
+            audio=None,
+            voice=None,
+            video_note=None,
+            sticker=None,
+            animation=None,
+            caption="",
+            text=None,
+            has_protected_content=False,
+        )
+        cache_key = "12345"
+        previous = safe_forward._forwards_restricted_cache.get(cache_key)
+        had_previous = cache_key in safe_forward._forwards_restricted_cache
+
+        async def scenario():
+            with (
+                patch.object(
+                    safe_forward,
+                    "_resolve_source",
+                    new=AsyncMock(return_value=(12345, None)),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_get_message",
+                    new=AsyncMock(return_value=message),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_is_forwards_restricted",
+                    new=AsyncMock(return_value=False),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_pyrogram_copy_with_notice",
+                    new=AsyncMock(
+                        side_effect=FakeChatForwardsRestricted("protected")
+                    ),
+                ),
+                patch.object(
+                    safe_forward,
+                    "_download_and_upload_via_pyrogram",
+                    new=AsyncMock(),
+                ) as reupload,
+                patch.object(
+                    safe_forward,
+                    "ChatForwardsRestricted",
+                    FakeChatForwardsRestricted,
+                ),
+                patch.object(safe_forward, "_BOT_API_UPLOAD_LIMIT", 1),
+            ):
+                result = await safe_forward.SafeForward.run(
+                    object(), FakeBot(), 456, -10012345, 7
+                )
+                return result, reupload
+
+        try:
+            result, reupload = asyncio.run(scenario())
+            self.assertEqual(result, (True, None))
+            reupload.assert_awaited_once()
+            self.assertTrue(
+                safe_forward._forwards_restricted_cache[cache_key]
+            )
+        finally:
+            if had_previous:
+                safe_forward._forwards_restricted_cache[cache_key] = previous
+            else:
+                safe_forward._forwards_restricted_cache.pop(cache_key, None)
+
     def test_per_media_and_per_job_limits_are_independent(self):
         with patch.multiple(
             safe_forward,
