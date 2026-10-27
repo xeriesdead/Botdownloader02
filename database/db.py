@@ -145,7 +145,7 @@ class Database:
 
     def create_user(self, user_id: int, username: str = ""):
         self.execute(
-            "INSERT INTO users(user_id, username) VALUES (?, ?) "
+            "INSERT INTO users(user_id, username, quota) VALUES (?, ?, 3) "
             "ON CONFLICT (user_id) DO NOTHING",
             (user_id, username),
         )
